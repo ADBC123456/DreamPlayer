@@ -663,24 +663,21 @@ class _DanmakuScreenState extends State<DanmakuScreen>
             opacity: _option.opacity,
             child: Stack(children: [
               RepaintBoundary(
-                  child: AnimatedBuilder(
-                animation: _animationController,
-                builder: (context, child) {
-                  return CustomPaint(
-                    painter: ScrollDanmakuPainter(
-                        _animationController.value,
-                        _scrollDanmakuItems,
-                        _option.duration.toDouble(),
-                        _safePlaybackRate(_option),
-                        _option.fontSize,
-                        _option.fontWeight,
-                        _option.showStroke,
-                        _danmakuHeight,
-                        _running,
-                        _tick),
-                    child: Container(),
-                  );
-                },
+                  child: CustomPaint(
+                painter: ScrollDanmakuPainter(
+                    _animationController.value,
+                    _scrollDanmakuItems,
+                    _option.duration.toDouble(),
+                    _safePlaybackRate(_option),
+                    _option.fontSize,
+                    _option.fontWeight,
+                    _option.showStroke,
+                    _danmakuHeight,
+                    _running,
+                    _tick,
+                    readTick: () => _tick,
+                    repaint: _animationController),
+                child: Container(),
               )),
               RepaintBoundary(
                   child: AnimatedBuilder(
