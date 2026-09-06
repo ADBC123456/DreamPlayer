@@ -16,6 +16,16 @@ void main() {
       expect(b.episode, 2);
     });
 
+    test('supports three and four digit SxxExxxx episodes', () {
+      final threeDigits = DanmakuEpisodeParser.parse('凡人修仙传.S01E146.mp4');
+      expect(threeDigits.season, 1);
+      expect(threeDigits.episode, 146);
+
+      final fourDigits = DanmakuEpisodeParser.parse('Long.Show.S02E1024.mkv');
+      expect(fourDigits.season, 2);
+      expect(fourDigits.episode, 1024);
+    });
+
     test('1x04 Plex style', () {
       final a = DanmakuEpisodeParser.parse('Series.1x04.WEB-DL.mkv');
       expect(a.source, EpisodeSource.seasonEpisode);
