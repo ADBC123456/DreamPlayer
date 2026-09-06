@@ -5,6 +5,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../app.dart' show appRouteObserver;
+import '../library/models/library_models.dart';
+import '../library/repository/library_repository.dart';
+import '../library/scanner/library_scanner.dart';
+import '../library/unified_library_service.dart';
 import '../models/video_item.dart';
 import '../services/continue_watching.dart';
 import '../services/file_browser.dart';
@@ -13,6 +17,7 @@ import '../services/library_folders.dart';
 import '../services/tmdb_client.dart';
 import '../services/webdav_client.dart';
 import '../widgets/folder_card.dart';
+import '../widgets/media_title_card.dart';
 import '../widgets/tv_text_field.dart';
 import 'ftp_screen.dart';
 import 'player_screen.dart';
@@ -27,7 +32,9 @@ import 'smb_screen.dart';
 import 'folder_screen.dart';
 import 'tmd_details_screen.dart';
 import 'upnp_screen.dart';
+import 'unified_title_details_screen.dart';
 import 'webdav_screen.dart';
+import '../l10n/app_localizations.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key, this.refreshTick});
@@ -42,6 +49,13 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen>
     with WidgetsBindingObserver, RouteAware {
+  final TextEditingController _librarySearchController =
+      TextEditingController();
+  Timer? _librarySearchDebounce;
+  String _librarySearch = '';
+  MediaTitleKind? _libraryKind;
+  bool _showUnorganized = false;
+
   /// "Continue watching": videos with a saved resume position, most recently
   /// played first (persisted via [ContinueWatchingStore]).
   List<ContinueWatchingEntry> _entries = const [];
@@ -55,6 +69,7 @@ class _HomeScreenState extends State<HomeScreen>
   Map<String, JellyfinItemInfo> _jellyfinMeta = const {};
 
   final JellyfinClient _client = JellyfinClient();
+  final UnifiedLibraryService _unifiedLibrary = UnifiedLibraryService.instance;
 
   /// Scrolls the home list back to the top after returning from playback, so
   /// the app-bar title and "Continue watching" heading are visible again.
@@ -70,6 +85,8 @@ class _HomeScreenState extends State<HomeScreen>
     LibraryFoldersStore.changes.addListener(_loadLibrary);
     // Update cards when TMDB metadata resolves for a visible entry.
     TmdService.instance.addListener(_onMetadataChanged);
+    _unifiedLibrary.addListener(_onUnifiedLibraryChanged);
+    unawaited(_unifiedLibrary.initialize());
     _loadLibrary();
     // Ask for every runtime permission at app open instead of mid-playback.
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -79,6 +96,10 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   void _onMetadataChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _onUnifiedLibraryChanged() {
     if (mounted) setState(() {});
   }
 
@@ -98,8 +119,11 @@ class _HomeScreenState extends State<HomeScreen>
     ContinueWatchingStore.changes.removeListener(_loadLibrary);
     LibraryFoldersStore.changes.removeListener(_loadLibrary);
     TmdService.instance.removeListener(_onMetadataChanged);
+    _unifiedLibrary.removeListener(_onUnifiedLibraryChanged);
     WidgetsBinding.instance.removeObserver(this);
     _scrollController.dispose();
+    _librarySearchDebounce?.cancel();
+    _librarySearchController.dispose();
     super.dispose();
   }
 
@@ -139,7 +163,6 @@ class _HomeScreenState extends State<HomeScreen>
         _jellyfinMeta = metas;
       });
     }
-    _resolveFolderMetadata(folders);
     _refreshJellyfinMeta(folders);
   }
 
@@ -199,23 +222,21 @@ class _HomeScreenState extends State<HomeScreen>
   Future<void> _addFolderToLibrary() async {
     final FileEntry? picked;
     try {
-      picked = await FileBrowserService.instance
-          .pickLibraryFolder()
-          .timeout(const Duration(seconds: 60));
+      picked = await FileBrowserService.instance.pickLibraryFolder().timeout(
+        const Duration(seconds: 60),
+      );
     } on TimeoutException {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text(
-            'The folder picker timed out. Please try again.',
-          ),
+          content: AppText('The folder picker timed out. Please try again.'),
         ),
       );
       return;
     } on PlatformException catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(e.message ?? 'Could not pick a folder')),
+        SnackBar(content: AppText(e.message ?? 'Could not pick a folder')),
       );
       return;
     }
@@ -231,7 +252,7 @@ class _HomeScreenState extends State<HomeScreen>
     await LibraryFoldersStore.add(folder);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('"${picked.name}" added to your library')),
+      SnackBar(content: AppText('"${picked.name}" added to your library')),
     );
     // TMDB poster for the new card resolves in the background.
     _resolveFolderMetadata([folder]);
@@ -239,7 +260,16 @@ class _HomeScreenState extends State<HomeScreen>
 
   /// Opens a library folder: the show/movie details screen with the folder's
   /// files (episodes) listed below it.
-  void _openFolder(LibraryFolder folder) async {
+  Future<void> _openFolder(LibraryFolder folder) async {
+    if (folder.source == LibraryFolderSource.webdav) {
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => WebDavScreen(initialFolder: folder),
+        ),
+      );
+      await _loadLibrary();
+      return;
+    }
     // Network bookmarks (SMB/WebDAV) open the folder browser directly
     // so the file list appears immediately — TmdDetailsScreen's file list
     // only knows FileBrowser/Jellyfin.
@@ -248,9 +278,7 @@ class _HomeScreenState extends State<HomeScreen>
         folder.source == LibraryFolderSource.ftp ||
         folder.source == LibraryFolderSource.upnp) {
       await Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => FolderScreen(folder: folder),
-        ),
+        MaterialPageRoute<void>(builder: (_) => FolderScreen(folder: folder)),
       );
       await _loadLibrary();
       return;
@@ -266,23 +294,63 @@ class _HomeScreenState extends State<HomeScreen>
     await _loadLibrary();
   }
 
+  Future<void> _openLibraryCard(LibraryFolder folder) async {
+    final metadata = TmdService.instance.metaFor(folder.metadataKey);
+    if (metadata == null) {
+      await _openFolder(folder);
+      return;
+    }
+
+    MediaTitle? indexedTitle() => _unifiedLibrary.snapshot.titles.values
+        .where(
+          (title) =>
+              title.tmdbId == metadata.movie.id &&
+              ((title.kind == MediaTitleKind.tv) ==
+                  (metadata.movie.kind == TmdKind.tv)),
+        )
+        .firstOrNull;
+
+    var title = indexedTitle();
+    if (title == null) {
+      try {
+        await _unifiedLibrary.refresh([folder]);
+        title = indexedTitle();
+      } catch (_) {
+        // The scan coordinator already preserves the old index and exposes
+        // the source-specific failure on the home progress bar.
+      }
+    }
+    if (!mounted) return;
+    if (title == null) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: AppText('尚未建立剧集索引，请重新自动识别这个目录')));
+      return;
+    }
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => UnifiedTitleDetailsScreen(titleId: title!.id),
+      ),
+    );
+  }
+
   Future<void> _removeFolder(LibraryFolder folder) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Remove from library?'),
-        content: Text(
+        title: const AppText('Remove from library?'),
+        content: AppText(
           '"${folder.name}" will no longer appear here. '
           'The files stay on your device.',
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Cancel'),
+            child: const AppText('Cancel'),
           ),
           FilledButton(
             onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Remove'),
+            child: const AppText('Remove'),
           ),
         ],
       ),
@@ -333,16 +401,16 @@ class _HomeScreenState extends State<HomeScreen>
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Remove from Continue watching?'),
-        content: Text('"${video.title}" will no longer appear here.'),
+        title: const AppText('Remove from Continue watching?'),
+        content: AppText('"${video.title}" will no longer appear here.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Cancel'),
+            child: const AppText('Cancel'),
           ),
           FilledButton(
             onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Remove'),
+            child: const AppText('Remove'),
           ),
         ],
       ),
@@ -417,11 +485,13 @@ class _HomeScreenState extends State<HomeScreen>
         }
       }
       // Non-episode or no TMDB match → pass through as-is.
-      result.add(_GroupedContinueWatching(
-        showTitle: video.title,
-        showMeta: null,
-        entries: [entry],
-      ));
+      result.add(
+        _GroupedContinueWatching(
+          showTitle: video.title,
+          showMeta: null,
+          entries: [entry],
+        ),
+      );
     }
 
     // Sort grouped shows by most-recently-played entry.
@@ -551,18 +621,251 @@ class _HomeScreenState extends State<HomeScreen>
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final tv = isTvMode(context);
+    final librarySnapshot = _unifiedLibrary.snapshot;
+    final indexedTitles =
+        librarySnapshot.titles.values
+            .where(
+              (title) =>
+                  !_showUnorganized &&
+                  (_libraryKind == null || title.kind == _libraryKind) &&
+                  _matchesLibrarySearch(librarySnapshot, title, _librarySearch),
+            )
+            .toList()
+          ..sort((a, b) {
+            final aNewest = _newestDiscoveryForTitle(librarySnapshot, a.id);
+            final bNewest = _newestDiscoveryForTitle(librarySnapshot, b.id);
+            return bNewest.compareTo(aNewest);
+          });
+    final unorganizedFiles =
+        librarySnapshot.files.values
+            .where(
+              (file) =>
+                  file.availability != MediaAvailability.missing &&
+                  (file.titleId == null ||
+                      file.identificationState != MetadataState.matched) &&
+                  (_librarySearch.isEmpty ||
+                      file.originalFileName.toLowerCase().contains(
+                        _librarySearch.toLowerCase(),
+                      )),
+            )
+            .toList()
+          ..sort(
+            (a, b) => (b.discoveredAt ?? DateTime.fromMillisecondsSinceEpoch(0))
+                .compareTo(
+                  a.discoveredAt ?? DateTime.fromMillisecondsSinceEpoch(0),
+                ),
+          );
+    final activeScans = _unifiedLibrary.progressByRoot.values
+        .where(
+          (progress) =>
+              progress.state == ScanState.queued ||
+              progress.state == ScanState.scanning,
+        )
+        .toList();
+    final failedScans = _unifiedLibrary.progressByRoot.values
+        .where((progress) => progress.state == ScanState.failed)
+        .toList();
     return Scaffold(
       body: TvOverscan(
         child: CustomScrollView(
           controller: _scrollController,
           slivers: [
-            SliverAppBar(title: const Text('DreamPlayer'), pinned: true),
-            // ---- Your library: user-added folders (e.g. TV-show folders) ----
+            SliverAppBar(title: const AppText('影视库'), pinned: true),
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+              sliver: SliverToBoxAdapter(
+                child: TvTextField(
+                  controller: _librarySearchController,
+                  onChanged: (value) {
+                    _librarySearchDebounce?.cancel();
+                    _librarySearchDebounce = Timer(
+                      const Duration(milliseconds: 250),
+                      () {
+                        if (mounted) setState(() => _librarySearch = value);
+                      },
+                    );
+                  },
+                  decoration: InputDecoration(
+                    hintText: '搜索影片、剧集或文件',
+                    prefixIcon: const Icon(Icons.search),
+                    suffixIcon: _librarySearchController.text.isEmpty
+                        ? null
+                        : IconButton(
+                            tooltip: 'Clear',
+                            onPressed: () {
+                              _librarySearchController.clear();
+                              setState(() => _librarySearch = '');
+                            },
+                            icon: const Icon(Icons.clear),
+                          ),
+                  ),
+                ),
+              ),
+            ),
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+              sliver: SliverToBoxAdapter(
+                child: Wrap(
+                  spacing: 8,
+                  children: [
+                    ChoiceChip(
+                      label: const AppText('全部'),
+                      selected: !_showUnorganized && _libraryKind == null,
+                      onSelected: (_) => setState(() {
+                        _showUnorganized = false;
+                        _libraryKind = null;
+                      }),
+                    ),
+                    ChoiceChip(
+                      label: const AppText('电影'),
+                      selected: _libraryKind == MediaTitleKind.movie,
+                      onSelected: (_) => setState(() {
+                        _showUnorganized = false;
+                        _libraryKind = MediaTitleKind.movie;
+                      }),
+                    ),
+                    ChoiceChip(
+                      label: const AppText('电视剧'),
+                      selected: _libraryKind == MediaTitleKind.tv,
+                      onSelected: (_) => setState(() {
+                        _showUnorganized = false;
+                        _libraryKind = MediaTitleKind.tv;
+                      }),
+                    ),
+                    ChoiceChip(
+                      label: AppText('待整理 (${unorganizedFiles.length})'),
+                      selected: _showUnorganized,
+                      onSelected: (_) => setState(() {
+                        _showUnorganized = true;
+                        _libraryKind = null;
+                      }),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            if (activeScans.isNotEmpty)
+              SliverToBoxAdapter(
+                child: LinearProgressIndicator(
+                  semanticsLabel: 'Scanning library',
+                  minHeight: 3,
+                ),
+              ),
+            if (activeScans.isNotEmpty)
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: AppText(
+                          '正在扫描 · 已发现 ${activeScans.fold<int>(0, (sum, item) => sum + item.discoveredFiles)} 个文件',
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: () {
+                          for (final progress in activeScans) {
+                            _unifiedLibrary.cancel(progress.rootId);
+                          }
+                        },
+                        child: const AppText('取消'),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            if (failedScans.isNotEmpty)
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                  child: Material(
+                    color: theme.colorScheme.errorContainer,
+                    borderRadius: BorderRadius.circular(12),
+                    child: ListTile(
+                      leading: const Icon(Icons.sync_problem),
+                      title: AppText('${failedScans.length} 个来源扫描失败'),
+                      subtitle: const AppText('旧索引已保留，可单独重试失败来源'),
+                      trailing: TextButton(
+                        onPressed: () => _retryFailedScans(failedScans),
+                        child: const AppText('重试'),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            if (indexedTitles.isNotEmpty) ...[
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+                sliver: SliverToBoxAdapter(
+                  child: AppText(
+                    '全部影片',
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+              _folderGridSliver(
+                count: indexedTitles.length,
+                itemBuilder: (context, index) {
+                  final title = indexedTitles[index];
+                  final files = librarySnapshot
+                      .filesForTitle(title.id)
+                      .where(
+                        (file) =>
+                            file.availability != MediaAvailability.missing,
+                      )
+                      .toList();
+                  return MediaTitleCard(
+                    key: ValueKey(title.id),
+                    title: title,
+                    episodeCount: librarySnapshot.availableEpisodeCount(
+                      title.id,
+                    ),
+                    versionCount: files.length,
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) =>
+                            UnifiedTitleDetailsScreen(titleId: title.id),
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ],
+            if (_showUnorganized)
+              unorganizedFiles.isEmpty
+                  ? const SliverToBoxAdapter(
+                      child: Padding(
+                        padding: EdgeInsets.all(24),
+                        child: Center(child: AppText('没有待整理的文件')),
+                      ),
+                    )
+                  : SliverList.builder(
+                      itemCount: unorganizedFiles.length,
+                      itemBuilder: (context, index) {
+                        final file = unorganizedFiles[index];
+                        return ListTile(
+                          minVerticalPadding: 12,
+                          leading: const Icon(Icons.video_file_outlined),
+                          title: AppText(file.originalFileName),
+                          subtitle: AppText(
+                            '${file.sourceRef.sourceType.toUpperCase()} · ${_identificationLabel(file.identificationState)}',
+                          ),
+                          trailing: const Icon(Icons.play_arrow),
+                          onTap: () => _playIndexedFile(file),
+                        );
+                      },
+                    ),
+            // Source bookmarks remain available for direct file browsing.
             if (_folders.isEmpty)
               SliverToBoxAdapter(
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-                  child: Text(
+                  child: AppText(
                     tv
                         ? 'No folders yet. Use the buttons above to add one.'
                         : 'No folders yet. Tap + to add one.',
@@ -576,8 +879,8 @@ class _HomeScreenState extends State<HomeScreen>
               SliverPadding(
                 padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
                 sliver: SliverToBoxAdapter(
-                  child: Text(
-                    'Your library',
+                  child: AppText(
+                    indexedTitles.isEmpty ? 'Your library' : '来源',
                     style: theme.textTheme.titleMedium?.copyWith(
                       fontWeight: FontWeight.w600,
                     ),
@@ -593,7 +896,8 @@ class _HomeScreenState extends State<HomeScreen>
                     folder: folder,
                     tmdbMeta: TmdService.instance.metaFor(folder.metadataKey),
                     jellyfinInfo: _jellyfinMeta[folder.id],
-                    onTap: () => _openFolder(folder),
+                    onTap: () => _openLibraryCard(folder),
+                    onBrowse: () => _openFolder(folder),
                     onLongPress: () => _removeFolder(folder),
                   );
                 },
@@ -603,7 +907,7 @@ class _HomeScreenState extends State<HomeScreen>
             SliverPadding(
               padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
               sliver: SliverToBoxAdapter(
-                child: Text(
+                child: AppText(
                   'Continue watching',
                   style: theme.textTheme.titleMedium?.copyWith(
                     fontWeight: FontWeight.w600,
@@ -623,10 +927,63 @@ class _HomeScreenState extends State<HomeScreen>
       ),
       floatingActionButton: FloatingActionButton(
         onPressed: _showAddMenu,
-        tooltip: 'Add a source',
+        tooltip: context.tr('Add a source'),
         child: const Icon(Icons.add),
       ),
     );
+  }
+
+  Future<void> _playIndexedFile(MediaFile file) async {
+    try {
+      final video = await _unifiedLibrary.resolvePlayable(file);
+      if (!mounted) return;
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(builder: (_) => PlayerScreen(video: video)),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: AppText('无法打开此文件：$error')));
+    }
+  }
+
+  Future<void> _retryFailedScans(List<ScanProgress> failed) async {
+    final ids = failed.map((progress) => progress.rootId).toSet();
+    final roots = _folders.where((folder) => ids.contains(folder.id)).toList();
+    if (roots.isEmpty) return;
+    await _unifiedLibrary.refresh(roots);
+  }
+
+  int _newestDiscoveryForTitle(LibrarySnapshot snapshot, String titleId) {
+    var newest = 0;
+    for (final file in snapshot.filesForTitle(titleId)) {
+      final value = file.discoveredAt?.millisecondsSinceEpoch ?? 0;
+      if (value > newest) newest = value;
+    }
+    return newest;
+  }
+
+  bool _matchesLibrarySearch(
+    LibrarySnapshot snapshot,
+    MediaTitle title,
+    String query,
+  ) {
+    final needle = query.trim().toLowerCase();
+    if (needle.isEmpty) return true;
+    if (title.displayTitle.toLowerCase().contains(needle) ||
+        (title.originalTitle?.toLowerCase().contains(needle) ?? false)) {
+      return true;
+    }
+    for (final episode in snapshot.episodes.values) {
+      if (episode.titleId == title.id &&
+          episode.displayName.toLowerCase().contains(needle)) {
+        return true;
+      }
+    }
+    return snapshot
+        .filesForTitle(title.id)
+        .any((file) => file.originalFileName.toLowerCase().contains(needle));
   }
 
   /// A responsive grid of video cards (columns from the screen width), shared
@@ -674,8 +1031,7 @@ class _HomeScreenState extends State<HomeScreen>
           final entry = group.mostRecent;
           final video = entry.video;
           final progress = video.duration > Duration.zero
-              ? (entry.position.inMilliseconds /
-                        video.duration.inMilliseconds)
+              ? (entry.position.inMilliseconds / video.duration.inMilliseconds)
                     .clamp(0.0, 1.0)
               : null;
           return VideoCard(
@@ -692,19 +1048,15 @@ class _HomeScreenState extends State<HomeScreen>
         final entry = group.entries.first;
         final video = entry.video;
         final progress = video.duration > Duration.zero
-            ? (entry.position.inMilliseconds /
-                      video.duration.inMilliseconds)
+            ? (entry.position.inMilliseconds / video.duration.inMilliseconds)
                   .clamp(0.0, 1.0)
             : null;
         final parsed = ParsedFileName.parse(video.title);
-        final continueLabel =
-            'Continue from ${_positionLabel(entry.position)}';
+        final continueLabel = 'Continue from ${_positionLabel(entry.position)}';
         return VideoCard(
           key: ValueKey(video.resumeKey ?? video.uri ?? video.title),
           video: video,
-          tmdbMeta: TmdService.instance.metaFor(
-            TmdStore.identityKeyFor(video),
-          ),
+          tmdbMeta: TmdService.instance.metaFor(TmdStore.identityKeyFor(video)),
           progress: progress,
           subtitle: parsed.isEpisode
               ? '${parsed.episodeLabel} · $continueLabel'
@@ -766,62 +1118,64 @@ class _HomeScreenState extends State<HomeScreen>
               children: [
                 ListTile(
                   leading: const Icon(Icons.cloud_outlined),
-                  title: const Text('WebDAV'),
-                  subtitle: const Text('Add a WebDAV server'),
+                  title: const AppText('WebDAV'),
+                  subtitle: const AppText('Add a WebDAV server'),
                   onTap: () => Navigator.of(context).pop('webdav'),
                 ),
                 // FTP/SFTP browse + playback on every platform (iOS via the
                 // Network.framework FTP client / Citadel SFTP in FtpClient.swift).
                 ListTile(
                   leading: const Icon(Icons.folder_outlined),
-                  title: const Text('FTP / SFTP'),
-                  subtitle: const Text('FTP or SFTP file server'),
+                  title: const AppText('FTP / SFTP'),
+                  subtitle: const AppText('FTP or SFTP file server'),
                   onTap: () => Navigator.of(context).pop('ftp'),
                 ),
                 ListTile(
                   leading: const Icon(Icons.live_tv_outlined),
-                  title: const Text('Jellyfin'),
-                  subtitle: const Text('Jellyfin / Emby media server'),
+                  title: const AppText('Jellyfin'),
+                  subtitle: const AppText('Jellyfin / Emby media server'),
                   onTap: () => Navigator.of(context).pop('jellyfin'),
                 ),
                 if (Platform.isAndroid)
                   ListTile(
                     leading: const Icon(Icons.folder_shared_outlined),
-                    title: const Text('Network shares'),
-                    subtitle: const Text('SMB / NAS shares'),
+                    title: const AppText('Network shares'),
+                    subtitle: const AppText('SMB / NAS shares'),
                     onTap: () => Navigator.of(context).pop('smb'),
                   )
                 else
                   ListTile(
                     leading: const Icon(Icons.folder_shared_outlined),
-                    title: const Text('Network shares'),
-                    subtitle: const Text('SMB via the Files app'),
+                    title: const AppText('Network shares'),
+                    subtitle: const AppText('SMB via the Files app'),
                     onTap: () => Navigator.of(context).pop('smb-ios'),
                   ),
                 ListTile(
                   leading: const Icon(Icons.cast_connected_outlined),
-                  title: const Text('DLNA'),
-                  subtitle: const Text('DLNA / UPnP servers on this network'),
+                  title: const AppText('DLNA'),
+                  subtitle: const AppText(
+                    'DLNA / UPnP servers on this network',
+                  ),
                   onTap: () => Navigator.of(context).pop('upnp'),
                 ),
                 ListTile(
                   leading: const Icon(Icons.link_outlined),
-                  title: const Text('Play URL'),
-                  subtitle: const Text('Stream a direct video link'),
+                  title: const AppText('Play URL'),
+                  subtitle: const AppText('Stream a direct video link'),
                   onTap: () => Navigator.of(context).pop('play-url'),
                 ),
                 ListTile(
                   leading: const Icon(Icons.video_library_outlined),
-                  title: const Text('Add folder to library'),
-                  subtitle: const Text(
+                  title: const AppText('Add folder to library'),
+                  subtitle: const AppText(
                     'A TV-show folder, a movie folder\u2026',
                   ),
                   onTap: () => Navigator.of(context).pop('add-folder'),
                 ),
                 ListTile(
                   leading: const Icon(Icons.storage_outlined),
-                  title: const Text('Internal storage'),
-                  subtitle: const Text('Browse files on this device'),
+                  title: const AppText('Internal storage'),
+                  subtitle: const AppText('Browse files on this device'),
                   onTap: () => Navigator.of(context).pop('storage'),
                 ),
               ],
@@ -886,7 +1240,7 @@ class _HomeScreenState extends State<HomeScreen>
     final url = await showDialog<String>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: const Text('Play URL'),
+        title: const AppText('Play URL'),
         content: TvTextField(
           controller: controller,
           autofocus: true,
@@ -894,21 +1248,21 @@ class _HomeScreenState extends State<HomeScreen>
           autocorrect: false,
           enableSuggestions: false,
           textInputAction: TextInputAction.done,
-          decoration: const InputDecoration(
+          decoration: InputDecoration(
             hintText: 'https://example.com/video.mp4',
-            labelText: 'Video URL',
+            labelText: context.tr('Video URL'),
           ),
           onSubmitted: (v) => Navigator.of(dialogContext).pop(v),
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('Cancel'),
+            child: const AppText('Cancel'),
           ),
           TextButton(
             onPressed: () =>
                 Navigator.of(dialogContext).pop(controller.text.trim()),
-            child: const Text('Play'),
+            child: const AppText('Play'),
           ),
         ],
       ),
@@ -918,7 +1272,7 @@ class _HomeScreenState extends State<HomeScreen>
     final uri = Uri.tryParse(url);
     if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Enter a valid http(s) URL')),
+        const SnackBar(content: AppText('Enter a valid http(s) URL')),
       );
       return;
     }
@@ -991,14 +1345,14 @@ class _EmptyLibrary extends StatelessWidget {
               color: colorScheme.onSurfaceVariant.withValues(alpha: 0.6),
             ),
             const SizedBox(height: 16),
-            Text(
+            AppText(
               'Nothing yet',
               style: theme.textTheme.titleMedium?.copyWith(
                 fontWeight: FontWeight.w600,
               ),
             ),
             const SizedBox(height: 8),
-            Text(
+            AppText(
               'Videos you play will appear here.',
               textAlign: TextAlign.center,
               style: theme.textTheme.bodyMedium?.copyWith(
@@ -1050,3 +1404,13 @@ class _GroupedContinueWatching {
     return continueLabel;
   }
 }
+
+String _identificationLabel(MetadataState state) => switch (state) {
+  MetadataState.noApiKey => '未配置 TMDB',
+  MetadataState.offline => '元数据服务不可达',
+  MetadataState.noMatch => '未找到匹配',
+  MetadataState.needsReview => '需要确认',
+  MetadataState.failed => '识别失败',
+  MetadataState.unresolved => '等待识别',
+  MetadataState.matched => '已识别',
+};

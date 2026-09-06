@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -26,7 +27,9 @@ void main() {
     });
 
     test('detects a TV episode and keeps the series name', () {
-      final parsed = ParsedFileName.parse('Breaking.Bad.S01E03.720p.WEB-DL.mkv');
+      final parsed = ParsedFileName.parse(
+        'Breaking.Bad.S01E03.720p.WEB-DL.mkv',
+      );
       expect(parsed.isEpisode, isTrue);
       expect(parsed.seriesName, 'Breaking Bad');
       expect(parsed.title, 'Breaking Bad');
@@ -158,32 +161,41 @@ void main() {
       // first character is the year itself, not a word boundary followed by
       // one. Reject year-at-position-0 so the parsed title stays intact.
       final parsed = ParsedFileName.parse('2001.ASpaceOdyssey.1080p.mkv');
-      expect(parsed.year, isNull,
-          reason: 'year at position 0 is a false-positive');
+      expect(
+        parsed.year,
+        isNull,
+        reason: 'year at position 0 is a false-positive',
+      );
       // The title cleans up "2001 A Space Odyssey" without the year stealing
       // it from the search query.
       expect(parsed.title, isNotEmpty);
     });
 
     group('parent folder fallback', () {
-      test('Episode01.mkv inside "Kakegurui Twin(2021)" → seriesName=Kakegurui Twin, year=2021', () {
-        final parsed = ParsedFileName.parse(
-          'Episode01.mkv',
-          parentFolderName: 'Kakegurui Twin(2021)',
-        );
-        expect(parsed.seriesName, 'Kakegurui Twin');
-        expect(parsed.year, 2021);
-        expect(parsed.title, isNotEmpty);
-      });
+      test(
+        'Episode01.mkv inside "Kakegurui Twin(2021)" → seriesName=Kakegurui Twin, year=2021',
+        () {
+          final parsed = ParsedFileName.parse(
+            'Episode01.mkv',
+            parentFolderName: 'Kakegurui Twin(2021)',
+          );
+          expect(parsed.seriesName, 'Kakegurui Twin');
+          expect(parsed.year, 2021);
+          expect(parsed.title, isNotEmpty);
+        },
+      );
 
-      test('Episode 02.mkv inside "Breaking Bad (2008)" inherits series + year', () {
-        final parsed = ParsedFileName.parse(
-          'Episode 02.mkv',
-          parentFolderName: 'Breaking Bad (2008)',
-        );
-        expect(parsed.seriesName, 'Breaking Bad');
-        expect(parsed.year, 2008);
-      });
+      test(
+        'Episode 02.mkv inside "Breaking Bad (2008)" inherits series + year',
+        () {
+          final parsed = ParsedFileName.parse(
+            'Episode 02.mkv',
+            parentFolderName: 'Breaking Bad (2008)',
+          );
+          expect(parsed.seriesName, 'Breaking Bad');
+          expect(parsed.year, 2008);
+        },
+      );
 
       test('does NOT inherit when the file already has SxxExx', () {
         // The file is explicit about its series via SxxExx — the parent
@@ -195,15 +207,18 @@ void main() {
         expect(parsed.seriesName, 'Wrong Show');
       });
 
-      test('does NOT inherit when the parent folder has SxxExx (it is an episode)', () {
-        // A parent folder named `Show.S02E05` is itself an episode, so it
-        // should not be treated as the show name.
-        final parsed = ParsedFileName.parse(
-          'something.mkv',
-          parentFolderName: 'Show.S02E05',
-        );
-        expect(parsed.seriesName, isNull);
-      });
+      test(
+        'does NOT inherit when the parent folder has SxxExx (it is an episode)',
+        () {
+          // A parent folder named `Show.S02E05` is itself an episode, so it
+          // should not be treated as the show name.
+          final parsed = ParsedFileName.parse(
+            'something.mkv',
+            parentFolderName: 'Show.S02E05',
+          );
+          expect(parsed.seriesName, isNull);
+        },
+      );
 
       test('parent folder with only a season tag inherits series + season', () {
         // Folder "Show.Name.Season.1" should provide the series name.
@@ -225,13 +240,16 @@ void main() {
         expect(parsed.year, isNull);
       });
 
-      test('parent folder name with no year and explicit file year keeps file year', () {
-        final parsed = ParsedFileName.parse(
-          'ep1.mkv',
-          parentFolderName: 'Some Anime',
-        );
-        expect(parsed.year, isNull);
-      });
+      test(
+        'parent folder name with no year and explicit file year keeps file year',
+        () {
+          final parsed = ParsedFileName.parse(
+            'ep1.mkv',
+            parentFolderName: 'Some Anime',
+          );
+          expect(parsed.year, isNull);
+        },
+      );
     });
   });
 
@@ -256,9 +274,7 @@ void main() {
           year: 1999,
           runtimeMinutes: 136,
           genres: ['Action', 'Sci-Fi'],
-          cast: [
-            TmdCastMember(name: 'Keanu Reeves', character: 'Neo'),
-          ],
+          cast: [TmdCastMember(name: 'Keanu Reeves', character: 'Neo')],
         ),
       );
       await TmdStore.save('the-matrix-1999', meta);
@@ -284,12 +300,34 @@ void main() {
         backdropPath: '/b.jpg',
       );
       expect(movie.posterUrl(), 'https://image.tmdb.org/t/p/w342/p.jpg');
-      expect(movie.posterUrl(width: 780), 'https://image.tmdb.org/t/p/w780/p.jpg');
       expect(
-        movie.backdropUrl(),
-        'https://image.tmdb.org/t/p/w780/b.jpg',
+        movie.posterUrl(width: 780),
+        'https://image.tmdb.org/t/p/w780/p.jpg',
       );
+      expect(movie.backdropUrl(), 'https://image.tmdb.org/t/p/w780/b.jpg');
     });
+
+    test(
+      'serializes concurrent saves without dropping unrelated keys',
+      () async {
+        SharedPreferences.setMockInitialValues({});
+        await Future.wait([
+          for (var i = 0; i < 24; i++)
+            TmdStore.save(
+              'video:$i',
+              TmdMeta(
+                movie: TmdMovie(id: i + 1, title: 'Title $i'),
+              ),
+            ),
+        ]);
+
+        final loaded = await TmdStore.loadAll();
+        expect(loaded, hasLength(24));
+        for (var i = 0; i < 24; i++) {
+          expect(loaded['video:$i']?.movie.title, 'Title $i');
+        }
+      },
+    );
   });
 
   group('TmdApi effective key', () {
@@ -299,6 +337,29 @@ void main() {
       expect(await api.effectiveApiKey(), isEmpty);
       SharedPreferences.setMockInitialValues({TmdApi.prefsKey: 'abc123'});
       expect(await api.effectiveApiKey(), 'abc123');
+    });
+  });
+
+  group('TmdApi language and localized matching', () {
+    test('defaults TMDB metadata to Chinese and supports English', () async {
+      SharedPreferences.setMockInitialValues({});
+      expect(await TmdApi(apiKey: '').effectiveLanguageTag(), 'zh-CN');
+      expect(
+        await TmdApi(apiKey: '', languageCode: 'en').effectiveLanguageTag(),
+        'en-US',
+      );
+    });
+
+    test('scores a Chinese original title when display title is English', () {
+      final api = TmdApi(apiKey: 'test');
+      final parsed = ParsedFileName.parse('沧元图.S01E01.mp4');
+      const movie = TmdMovie(
+        id: 229192,
+        title: 'The Demon Hunter',
+        originalTitle: '沧元图',
+        kind: TmdKind.tv,
+      );
+      expect(api.scoreCandidate(movie, parsed), 1.0);
     });
   });
 
@@ -426,10 +487,10 @@ void main() {
       expect(restored.guestStars[0].name, 'David Morse');
       expect(restored.guestStars[0].character, 'Michael Tritter');
       expect(restored.stills, hasLength(2));
-      expect(
-        restored.stillUrls(),
-        ['https://image.tmdb.org/t/p/w500/stills/e4-1.jpg', 'https://image.tmdb.org/t/p/w500/stills/e4-2.jpg'],
-      );
+      expect(restored.stillUrls(), [
+        'https://image.tmdb.org/t/p/w500/stills/e4-1.jpg',
+        'https://image.tmdb.org/t/p/w500/stills/e4-2.jpg',
+      ]);
     });
 
     test('episode fromJson reads API credits/images keys too', () {
@@ -438,10 +499,18 @@ void main() {
         'name': 'Humble',
         'credits': {
           'cast': [
-            {'name': 'Hugh Laurie', 'character': 'Dr. House', 'profile_path': '/hl.jpg'},
+            {
+              'name': 'Hugh Laurie',
+              'character': 'Dr. House',
+              'profile_path': '/hl.jpg',
+            },
           ],
           'guest_stars': [
-            {'name': 'David Morse', 'character': 'Michael Tritter', 'profile_path': '/dm.jpg'},
+            {
+              'name': 'David Morse',
+              'character': 'Michael Tritter',
+              'profile_path': '/dm.jpg',
+            },
           ],
         },
         'images': {
@@ -454,10 +523,16 @@ void main() {
       expect(parsed.episodeNumber, 4);
       expect(parsed.cast.single.name, 'Hugh Laurie');
       expect(parsed.cast.single.character, 'Dr. House');
-      expect(parsed.cast.single.profileUrl(width: 185), 'https://image.tmdb.org/t/p/w185/hl.jpg');
+      expect(
+        parsed.cast.single.profileUrl(width: 185),
+        'https://image.tmdb.org/t/p/w185/hl.jpg',
+      );
       expect(parsed.guestStars.single.name, 'David Morse');
       expect(parsed.guestStars.single.character, 'Michael Tritter');
-      expect(parsed.guestStars.single.profileUrl(width: 185), 'https://image.tmdb.org/t/p/w185/dm.jpg');
+      expect(
+        parsed.guestStars.single.profileUrl(width: 185),
+        'https://image.tmdb.org/t/p/w185/dm.jpg',
+      );
       expect(parsed.stills, ['/stills/e4-1.jpg']);
     });
 
@@ -527,6 +602,64 @@ void main() {
     });
   });
 
+  group('TmdService concurrent metadata', () {
+    const key = 'folder:concurrent';
+    const original = TmdMovie(id: 7, title: 'Original', kind: TmdKind.tv);
+
+    test(
+      'shares season requests, supports specials, and merges details',
+      () async {
+        SharedPreferences.setMockInitialValues({});
+        await TmdStore.save(key, const TmdMeta(movie: original));
+        final api = _ControlledTmdApi();
+        final service = TmdService.forTesting(api);
+        await service.ensureLoaded();
+
+        final firstSeason = service.seasonFor(key, 0);
+        final secondSeason = service.seasonFor(key, 0);
+        final details = service.detailsFor(key);
+        await Future<void>.delayed(Duration.zero);
+        expect(api.seasonCalls, 1);
+        expect(api.detailsCalls, 1);
+
+        api.seasonCompleter.complete(const [
+          TmdEpisode(episodeNumber: 1, name: 'Special'),
+        ]);
+        expect((await firstSeason)?.seasonNumber, 0);
+        expect((await secondSeason)?.episode(1)?.name, 'Special');
+
+        api.detailsCompleter.complete(
+          const TmdDetails(title: 'Original', overview: 'Loaded details'),
+        );
+        expect((await details)?.overview, 'Loaded details');
+        expect(service.metaFor(key)?.seasons[0]?.episode(1)?.name, 'Special');
+        expect(service.metaFor(key)?.details?.overview, 'Loaded details');
+      },
+    );
+
+    test('discards an old response after a manual correction', () async {
+      SharedPreferences.setMockInitialValues({});
+      await TmdStore.save(key, const TmdMeta(movie: original));
+      final api = _ControlledTmdApi();
+      final service = TmdService.forTesting(api);
+      await service.ensureLoaded();
+
+      final oldRequest = service.detailsFor(key);
+      await service.setManualFolder(
+        key,
+        const TmdMovie(id: 8, title: 'Corrected', kind: TmdKind.tv),
+      );
+      api.detailsCompleter.complete(
+        const TmdDetails(title: 'Original', overview: 'Stale details'),
+      );
+      await oldRequest;
+
+      expect(service.metaFor(key)?.movie.title, 'Corrected');
+      expect(service.metaFor(key)?.details, isNull);
+      expect((await TmdStore.loadAll())[key]?.movie.title, 'Corrected');
+    });
+  });
+
   group('Levenshtein scoring', () {
     test('exact title match scores 1.0 via bestMatch', () async {
       SharedPreferences.setMockInitialValues({});
@@ -539,14 +672,41 @@ void main() {
       expect(parsed.isEpisode, isTrue);
     });
 
-    test('year tiebreaker: same title, different years — year matched wins', () async {
-      // Verify that ParsedFileName extracts year correctly for the tiebreaker.
-      final parsed = ParsedFileName.parse('Kakegurui Twin (2021) S01E01.mkv');
-      expect(parsed.year, 2021);
-      // The search would return both 2021 and 2022 results; with the year
-      // tiebreaker in _score, the 2021 result should score higher.
-      final parsed2 = ParsedFileName.parse('Kakegurui Twin (2022) S01E01.mkv');
-      expect(parsed2.year, 2022);
-    });
+    test(
+      'year tiebreaker: same title, different years — year matched wins',
+      () async {
+        // Verify that ParsedFileName extracts year correctly for the tiebreaker.
+        final parsed = ParsedFileName.parse('Kakegurui Twin (2021) S01E01.mkv');
+        expect(parsed.year, 2021);
+        // The search would return both 2021 and 2022 results; with the year
+        // tiebreaker in _score, the 2021 result should score higher.
+        final parsed2 = ParsedFileName.parse(
+          'Kakegurui Twin (2022) S01E01.mkv',
+        );
+        expect(parsed2.year, 2022);
+      },
+    );
   });
+}
+
+class _ControlledTmdApi extends TmdApi {
+  _ControlledTmdApi() : super(apiKey: 'test');
+
+  final Completer<TmdDetails> detailsCompleter = Completer<TmdDetails>();
+  final Completer<List<TmdEpisode>> seasonCompleter =
+      Completer<List<TmdEpisode>>();
+  int detailsCalls = 0;
+  int seasonCalls = 0;
+
+  @override
+  Future<TmdDetails> details(TmdMovie movie) {
+    detailsCalls++;
+    return detailsCompleter.future;
+  }
+
+  @override
+  Future<List<TmdEpisode>> seasonEpisodes(TmdMovie movie, int seasonNumber) {
+    seasonCalls++;
+    return seasonCompleter.future;
+  }
 }

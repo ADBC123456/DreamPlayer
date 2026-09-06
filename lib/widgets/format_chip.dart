@@ -1,15 +1,10 @@
 import 'package:flutter/material.dart';
+import '../l10n/app_localizations.dart';
 
 class FormatChip extends StatelessWidget {
-  const FormatChip({
-    super.key,
-    required this.label,
-    required this.color,
-  });
-
+  const FormatChip({super.key, required this.label, required this.color});
   final String label;
   final Color color;
-
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -19,7 +14,7 @@ class FormatChip extends StatelessWidget {
         borderRadius: BorderRadius.circular(6),
         border: Border.all(color: color.withValues(alpha: 0.6), width: 1),
       ),
-      child: Text(
+      child: AppText(
         label,
         style: TextStyle(
           color: color,

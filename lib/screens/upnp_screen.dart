@@ -10,6 +10,7 @@ import '../utils/tv_helper.dart';
 import '../widgets/tv_overscan.dart';
 import '../widgets/tv_tile.dart';
 import 'tmd_details_screen.dart';
+import '../l10n/app_localizations.dart';
 
 class UpnpScreen extends StatefulWidget {
   const UpnpScreen({super.key});
@@ -128,14 +129,18 @@ class _UpnpScreenState extends State<UpnpScreen> {
     final service = TmdService.instance;
     for (final entry in entries) {
       if (entry.isDirectory || entry.url == null) continue;
-      service.resolve(VideoItem(
-        id: _identityKey(entry),
-        title: entry.name,
-        uri: entry.url!,
-        resumeKey: _identityKey(entry),
-        duration: Duration.zero,
-        sizeBytes: entry.size,
-      )).catchError((_) => null as TmdMeta?);
+      service
+          .resolve(
+            VideoItem(
+              id: _identityKey(entry),
+              title: entry.name,
+              uri: entry.url!,
+              resumeKey: _identityKey(entry),
+              duration: Duration.zero,
+              sizeBytes: entry.size,
+            ),
+          )
+          .catchError((_) => null as TmdMeta?);
     }
   }
 
@@ -180,12 +185,14 @@ class _UpnpScreenState extends State<UpnpScreen> {
         externalSubtitles: entry.externalSubs
             .asMap()
             .entries
-            .map((e) => VideoExternalSub(
-                  uri: e.value.url,
-                  label:
-                      'Subtitle ${e.key + 1} · ${e.value.extension.toUpperCase()}',
-                  mimeType: e.value.mimeType,
-                ))
+            .map(
+              (e) => VideoExternalSub(
+                uri: e.value.url,
+                label:
+                    'Subtitle ${e.key + 1} · ${e.value.extension.toUpperCase()}',
+                mimeType: e.value.mimeType,
+              ),
+            )
             .toList(),
         videoCodec: fi.videoCodec,
         audioCodec: fi.audioCodec,
@@ -232,15 +239,19 @@ class _UpnpScreenState extends State<UpnpScreen> {
       },
       child: Scaffold(
         appBar: AppBar(
-          title: Text(isBrowsingServer ? (_activeServer!.name) : 'DLNA'),
+          title: AppText(isBrowsingServer ? (_activeServer!.name) : 'DLNA'),
           actions: [
             if (!isBrowsingServer)
               IconButton(
                 icon: _discovering
-                    ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
                     : const Icon(Icons.refresh),
                 onPressed: _discovering ? null : _discover,
-                tooltip: 'Discover',
+                tooltip: context.tr('Discover'),
               ),
           ],
         ),
@@ -262,9 +273,9 @@ class _UpnpScreenState extends State<UpnpScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text(_discoverError!, textAlign: TextAlign.center),
+              AppText(_discoverError!, textAlign: TextAlign.center),
               const SizedBox(height: 12),
-              FilledButton(onPressed: _discover, child: const Text('Retry')),
+              FilledButton(onPressed: _discover, child: const AppText('Retry')),
             ],
           ),
         ),
@@ -278,20 +289,36 @@ class _UpnpScreenState extends State<UpnpScreen> {
           children: [
             const Icon(Icons.cast_connected_outlined, size: 48),
             const SizedBox(height: 12),
-            const Text('No DLNA servers found', style: TextStyle(fontWeight: FontWeight.w600)),
+            const AppText(
+              'No DLNA servers found',
+              style: TextStyle(fontWeight: FontWeight.w600),
+            ),
             const SizedBox(height: 8),
-            Text(
+            AppText(
               '1. Allow Local Network when prompted (Settings → Privacy & Security → Local Network → DreamPlayer).\n'
               '2. iPad and the server must be on the same Wi-Fi.\n'
               '3. Tap Discover again after granting.',
               textAlign: TextAlign.center,
-              style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant, fontSize: 13),
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+                fontSize: 13,
+              ),
             ),
             const SizedBox(height: 16),
-            FilledButton.icon(onPressed: _discover, icon: const Icon(Icons.refresh), label: const Text('Discover again')),
+            FilledButton.icon(
+              onPressed: _discover,
+              icon: const Icon(Icons.refresh),
+              label: const AppText('Discover again'),
+            ),
             if (_diag.isNotEmpty) ...[
               const SizedBox(height: 20),
-              Align(alignment: Alignment.centerLeft, child: Text('Diagnostics', style: Theme.of(context).textTheme.titleSmall)),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: AppText(
+                  'Diagnostics',
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+              ),
               const SizedBox(height: 6),
               Container(
                 width: double.infinity,
@@ -300,7 +327,10 @@ class _UpnpScreenState extends State<UpnpScreen> {
                   color: Theme.of(context).colorScheme.surfaceContainerLow,
                   borderRadius: BorderRadius.circular(8),
                 ),
-                child: Text(_diag.join('\n'), style: const TextStyle(fontFamily: 'monospace', fontSize: 11)),
+                child: AppText(
+                  _diag.join('\n'),
+                  style: const TextStyle(fontFamily: 'monospace', fontSize: 11),
+                ),
               ),
             ],
           ],
@@ -314,8 +344,12 @@ class _UpnpScreenState extends State<UpnpScreen> {
         final s = _servers[i];
         return TvTile(
           leading: const Icon(Icons.dns_outlined),
-          title: Text(s.name),
-          subtitle: Text(s.location, maxLines: 1, overflow: TextOverflow.ellipsis),
+          title: AppText(s.name),
+          subtitle: AppText(
+            s.location,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
           trailing: const Icon(Icons.chevron_right),
           onTap: () => _openServer(s),
         );
@@ -346,20 +380,30 @@ class _UpnpScreenState extends State<UpnpScreen> {
                     child: Row(
                       children: [
                         for (int i = 0; i < crumbs.length; i++) ...[
-                          if (i > 0) const Padding(padding: EdgeInsets.symmetric(horizontal: 4), child: Text('›')),
+                          if (i > 0)
+                            const Padding(
+                              padding: EdgeInsets.symmetric(horizontal: 4),
+                              child: AppText('›'),
+                            ),
                           InkWell(
                             onTap: i == crumbs.length - 1
                                 ? null
                                 : () async {
                                     final target = crumbs[i];
-                                    setState(() => _crumbs = crumbs.sublist(0, i + 1));
+                                    setState(
+                                      () => _crumbs = crumbs.sublist(0, i + 1),
+                                    );
                                     await _browse(_activeServer!, target.id);
                                   },
-                            child: Text(
+                            child: AppText(
                               crumbs[i].name,
                               style: TextStyle(
-                                fontWeight: i == crumbs.length - 1 ? FontWeight.w600 : FontWeight.w400,
-                                color: i == crumbs.length - 1 ? null : Theme.of(context).colorScheme.primary,
+                                fontWeight: i == crumbs.length - 1
+                                    ? FontWeight.w600
+                                    : FontWeight.w400,
+                                color: i == crumbs.length - 1
+                                    ? null
+                                    : Theme.of(context).colorScheme.primary,
                               ),
                             ),
                           ),
@@ -368,7 +412,10 @@ class _UpnpScreenState extends State<UpnpScreen> {
                     ),
                   ),
                 ),
-                IconButton(icon: const Icon(Icons.refresh), onPressed: () => _browse(_activeServer!, crumbs.last.id)),
+                IconButton(
+                  icon: const Icon(Icons.refresh),
+                  onPressed: () => _browse(_activeServer!, crumbs.last.id),
+                ),
               ],
             ),
           ),
@@ -378,61 +425,87 @@ class _UpnpScreenState extends State<UpnpScreen> {
           child: _browsing
               ? const Center(child: CircularProgressIndicator())
               : _browseError != null
-                  ? Center(
-                      child: Padding(
-                        padding: const EdgeInsets.all(24),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(_browseError!, textAlign: TextAlign.center),
-                            const SizedBox(height: 12),
-                            FilledButton(onPressed: () => _browse(_activeServer!, crumbs.last.id), child: const Text('Retry')),
-                          ],
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        AppText(_browseError!, textAlign: TextAlign.center),
+                        const SizedBox(height: 12),
+                        FilledButton(
+                          onPressed: () =>
+                              _browse(_activeServer!, crumbs.last.id),
+                          child: const AppText('Retry'),
                         ),
-                      ),
-                    )
-                  : _entries.isEmpty
-                      ? SingleChildScrollView(
-                          padding: const EdgeInsets.all(24),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Text('Nothing here'),
-                              if (_diag.isNotEmpty) ...[
-                                const SizedBox(height: 16),
-                                Container(
-                                  width: double.infinity,
-                                  padding: const EdgeInsets.all(10),
-                                  decoration: BoxDecoration(
-                                    color: Theme.of(context).colorScheme.surfaceContainerLow,
-                                    borderRadius: BorderRadius.circular(8),
-                                  ),
-                                  child: Text(_diag.join('\n'), style: const TextStyle(fontFamily: 'monospace', fontSize: 11)),
-                                ),
-                              ],
-                            ],
+                      ],
+                    ),
+                  ),
+                )
+              : _entries.isEmpty
+              ? SingleChildScrollView(
+                  padding: const EdgeInsets.all(24),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const AppText('Nothing here'),
+                      if (_diag.isNotEmpty) ...[
+                        const SizedBox(height: 16),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: Theme.of(
+                              context,
+                            ).colorScheme.surfaceContainerLow,
+                            borderRadius: BorderRadius.circular(8),
                           ),
-                        )
-                      : ListView.separated(
-                          itemCount: _entries.length,
-                          separatorBuilder: (context, _) => const Divider(height: 1),
-                          itemBuilder: (context, i) {
-                            final e = _entries[i];
-                            final isDir = e.isDirectory;
-                            final posterUrl = isDir
-                                ? null
-                                : posterUrlOf(TmdService.instance.metaFor(_identityKey(e)));
-                            return TvTile(
-                              leading: posterUrl != null
-                                  ? _Poster(posterUrl: posterUrl)
-                                  : Icon(isDir ? Icons.folder_outlined : Icons.movie_outlined),
-                              title: Text(e.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-                              subtitle: isDir ? null : (e.size > 0 ? Text(_formatBytes(e.size)) : null),
-                              trailing: Icon(isDir ? Icons.chevron_right : Icons.play_arrow),
-                              onTap: () => _onEntryTap(e),
-                            );
-                          },
+                          child: AppText(
+                            _diag.join('\n'),
+                            style: const TextStyle(
+                              fontFamily: 'monospace',
+                              fontSize: 11,
+                            ),
+                          ),
                         ),
+                      ],
+                    ],
+                  ),
+                )
+              : ListView.separated(
+                  itemCount: _entries.length,
+                  separatorBuilder: (context, _) => const Divider(height: 1),
+                  itemBuilder: (context, i) {
+                    final e = _entries[i];
+                    final isDir = e.isDirectory;
+                    final posterUrl = isDir
+                        ? null
+                        : posterUrlOf(
+                            TmdService.instance.metaFor(_identityKey(e)),
+                          );
+                    return TvTile(
+                      leading: posterUrl != null
+                          ? _Poster(posterUrl: posterUrl)
+                          : Icon(
+                              isDir
+                                  ? Icons.folder_outlined
+                                  : Icons.movie_outlined,
+                            ),
+                      title: AppText(
+                        e.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      subtitle: isDir
+                          ? null
+                          : (e.size > 0 ? AppText(_formatBytes(e.size)) : null),
+                      trailing: Icon(
+                        isDir ? Icons.chevron_right : Icons.play_arrow,
+                      ),
+                      onTap: () => _onEntryTap(e),
+                    );
+                  },
+                ),
         ),
       ],
     );
@@ -441,7 +514,9 @@ class _UpnpScreenState extends State<UpnpScreen> {
   static String _formatBytes(int bytes) {
     if (bytes < 1024) return '$bytes B';
     if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
-    if (bytes < 1024 * 1024 * 1024) return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    if (bytes < 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
     return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
   }
 }

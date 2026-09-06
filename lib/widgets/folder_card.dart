@@ -11,6 +11,7 @@ import '../services/watched_store.dart';
 import '../utils/season_group.dart' as sg;
 import '../utils/tv_helper.dart';
 import 'season_progress_ring.dart';
+import '../l10n/app_localizations.dart';
 
 /// Library card for a user-added folder. Shows the folder's TMDB match (poster
 /// art, real title, year, TV/Movie chip) when one resolves, otherwise the
@@ -23,6 +24,7 @@ class FolderCard extends StatefulWidget {
     required this.tmdbMeta,
     this.jellyfinInfo,
     required this.onTap,
+    this.onBrowse,
     this.onLongPress,
   });
 
@@ -33,6 +35,7 @@ class FolderCard extends StatefulWidget {
   /// used when no TMDB match is available.
   final JellyfinItemInfo? jellyfinInfo;
   final VoidCallback onTap;
+  final VoidCallback? onBrowse;
   final VoidCallback? onLongPress;
 
   @override
@@ -87,9 +90,14 @@ class _FolderCardState extends State<FolderCard> {
       final watchedKeys = await WatchedStore.load();
       if (folder.isJellyfin) {
         final client = JellyfinClient();
-        final server = await client.serverForUrl(folder.jellyfinServerUrl ?? '');
+        final server = await client.serverForUrl(
+          folder.jellyfinServerUrl ?? '',
+        );
         if (server == null || !server.isAuthenticated) return;
-        final items = await client.getItems(server, folder.jellyfinItemId ?? '');
+        final items = await client.getItems(
+          server,
+          folder.jellyfinItemId ?? '',
+        );
         final playables = items.where((i) => i.isPlayable).toList();
         if (playables.isEmpty) return;
         final episodes = playables
@@ -110,14 +118,10 @@ class _FolderCardState extends State<FolderCard> {
         if (grouped.isEmpty) return;
         final season = grouped.keys.reduce((a, b) => a < b ? a : b);
         final list = grouped[season]!;
-        final watched = sg.watchedCount<dynamic>(
-          list,
-          watchedKeys,
-          (e) {
-            final item = e as JellyfinItem;
-            return client.videoItem(server, item).resumeKey;
-          },
-        );
+        final watched = sg.watchedCount<dynamic>(list, watchedKeys, (e) {
+          final item = e as JellyfinItem;
+          return client.videoItem(server, item).resumeKey;
+        });
         if (!mounted) return;
         setState(() {
           _seasonNumber = season;
@@ -125,15 +129,15 @@ class _FolderCardState extends State<FolderCard> {
           _seasonTotal = list.length;
         });
       } else {
-        final entries =
-            await FileBrowserService.instance.listDirectory(folder.path);
+        final entries = await FileBrowserService.instance.listDirectory(
+          folder.path,
+        );
         final videos = entries.where((e) => !e.isDirectory).toList();
         if (videos.isEmpty) return;
         final episodes = videos
             .where((e) => ParsedFileName.parse(e.name).isEpisode)
             .toList();
-        final List<FileEntry> source =
-            episodes.isNotEmpty ? episodes : videos;
+        final List<FileEntry> source = episodes.isNotEmpty ? episodes : videos;
         Map<int, List<FileEntry>> grouped;
         if (episodes.isNotEmpty) {
           grouped = sg.groupBySeason<FileEntry>(
@@ -201,11 +205,17 @@ class _FolderCardState extends State<FolderCard> {
   static String _networkLabel(LibraryFolder folder) {
     switch (folder.source) {
       case LibraryFolderSource.smb:
-        return folder.networkLabel?.isNotEmpty == true ? 'SMB · ${folder.networkLabel}' : 'SMB';
+        return folder.networkLabel?.isNotEmpty == true
+            ? 'SMB · ${folder.networkLabel}'
+            : 'SMB';
       case LibraryFolderSource.webdav:
-        return folder.networkLabel?.isNotEmpty == true ? 'WebDAV · ${folder.networkLabel}' : 'WebDAV';
+        return folder.networkLabel?.isNotEmpty == true
+            ? 'WebDAV · ${folder.networkLabel}'
+            : 'WebDAV';
       case LibraryFolderSource.ftp:
-        return folder.networkLabel?.isNotEmpty == true ? 'FTP · ${folder.networkLabel}' : 'FTP';
+        return folder.networkLabel?.isNotEmpty == true
+            ? 'FTP · ${folder.networkLabel}'
+            : 'FTP';
       case LibraryFolderSource.upnp:
         return 'DLNA';
       case LibraryFolderSource.jellyfin:
@@ -259,30 +269,31 @@ class _FolderCardState extends State<FolderCard> {
             if (networkTag != null && networkTag.isNotEmpty) networkTag,
           ].join(' · ')
         : hasJellyfin
-            ? [
-                if (info.kindLabel.isNotEmpty) info.kindLabel,
-                if (info.year != null) '${info.year}',
-                'Jellyfin',
-              ].where((s) => s.isNotEmpty).join(' · ')
-            : [
-                if (folder.name.isNotEmpty) folder.name,
-                if (networkTag != null && networkTag.isNotEmpty) networkTag,
-              ].join(' · ');
+        ? [
+            if (info.kindLabel.isNotEmpty) info.kindLabel,
+            if (info.year != null) '${info.year}',
+            'Jellyfin',
+          ].where((s) => s.isNotEmpty).join(' · ')
+        : [
+            if (folder.name.isNotEmpty) folder.name,
+            if (networkTag != null && networkTag.isNotEmpty) networkTag,
+          ].join(' · ');
 
-    // Poster: TMDB when matched, else the Jellyfin server art, else the
-    // gradient placeholder.
+    // Prefer TMDB, but keep Jellyfin art as an actual load-error fallback.
+    // A non-null TMDB path does not guarantee that the CDN image still exists.
     final posterUrl = hasMeta
         ? movie.posterUrl()
         : (hasJellyfin ? info.imageUrl : null);
+    final fallbackPosterUrl = hasMeta && hasJellyfin ? info.imageUrl : null;
 
     // TV/Movie badge: TMDB kind, else the Jellyfin type, else none.
     final kindBadge = hasMeta
         ? (movie.kind == TmdKind.tv ? 'TV' : 'Movie')
         : (hasJellyfin && info.kindLabel.isNotEmpty
-            ? (info.isTv ? 'TV' : 'Movie')
-            : null);
-    final kindColor = (hasMeta && movie.kind == TmdKind.tv) ||
-            (hasJellyfin && info.isTv)
+              ? (info.isTv ? 'TV' : 'Movie')
+              : null);
+    final kindColor =
+        (hasMeta && movie.kind == TmdKind.tv) || (hasJellyfin && info.isTv)
         ? const Color(0xFF9C27B0)
         : const Color(0xFF1565C0);
 
@@ -306,10 +317,9 @@ class _FolderCardState extends State<FolderCard> {
                     ),
                     boxShadow: [
                       BoxShadow(
-                        color: Theme.of(context)
-                            .colorScheme
-                            .primary
-                            .withValues(alpha: 0.4),
+                        color: Theme.of(
+                          context,
+                        ).colorScheme.primary.withValues(alpha: 0.4),
                         blurRadius: 12,
                         spreadRadius: 2,
                       ),
@@ -354,11 +364,19 @@ class _FolderCardState extends State<FolderCard> {
                               posterUrl,
                               fit: BoxFit.cover,
                               errorBuilder: (_, _, _) =>
-                                  const SizedBox.shrink(),
+                                  fallbackPosterUrl != null &&
+                                      fallbackPosterUrl != posterUrl
+                                  ? Image.network(
+                                      fallbackPosterUrl,
+                                      fit: BoxFit.cover,
+                                      errorBuilder: (_, _, _) =>
+                                          const SizedBox.shrink(),
+                                    )
+                                  : const SizedBox.shrink(),
                               loadingBuilder: (context, child, progress) =>
                                   progress == null
-                                      ? child
-                                      : const SizedBox.shrink(),
+                                  ? child
+                                  : const SizedBox.shrink(),
                             ),
                           if (kindBadge != null)
                             Positioned(
@@ -409,14 +427,19 @@ class _FolderCardState extends State<FolderCard> {
                               left: 8,
                               child: Container(
                                 padding: const EdgeInsets.symmetric(
-                                    horizontal: 6, vertical: 2),
+                                  horizontal: 6,
+                                  vertical: 2,
+                                ),
                                 decoration: BoxDecoration(
                                   color: Colors.black.withValues(alpha: 0.6),
                                   borderRadius: BorderRadius.circular(4),
                                 ),
-                                child: Text(
-                                  sg.seasonBadge(_seasonNumber!,
-                                      _seasonWatched!, _seasonTotal!),
+                                child: AppText(
+                                  sg.seasonBadge(
+                                    _seasonNumber!,
+                                    _seasonWatched!,
+                                    _seasonTotal!,
+                                  ),
                                   style: const TextStyle(
                                     color: Colors.white,
                                     fontSize: 10,
@@ -433,22 +456,40 @@ class _FolderCardState extends State<FolderCard> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(
-                            title,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context)
-                                .textTheme
-                                .titleSmall
-                                ?.copyWith(fontWeight: FontWeight.w600),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: AppText(
+                                  title,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: Theme.of(context).textTheme.titleSmall
+                                      ?.copyWith(fontWeight: FontWeight.w600),
+                                ),
+                              ),
+                              if (widget.onBrowse != null)
+                                SizedBox.square(
+                                  dimension: 40,
+                                  child: IconButton(
+                                    padding: EdgeInsets.zero,
+                                    tooltip: '浏览来源文件',
+                                    onPressed: widget.onBrowse,
+                                    icon: const Icon(
+                                      Icons.folder_open_outlined,
+                                      size: 20,
+                                    ),
+                                  ),
+                                ),
+                            ],
                           ),
-                          const SizedBox(height: 2),
-                          Text(
+                          if (widget.onBrowse == null)
+                            const SizedBox(height: 2),
+                          AppText(
                             subtitle,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                                color: colorScheme.onSurfaceVariant),
+                            style: Theme.of(context).textTheme.bodySmall
+                                ?.copyWith(color: colorScheme.onSurfaceVariant),
                           ),
                         ],
                       ),
@@ -478,7 +519,7 @@ class _FolderBadge extends StatelessWidget {
         color: background,
         borderRadius: BorderRadius.circular(4),
       ),
-      child: Text(
+      child: AppText(
         label,
         style: const TextStyle(
           color: Colors.white,

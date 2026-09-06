@@ -10,6 +10,7 @@ import '../widgets/tv_overscan.dart';
 import '../widgets/tv_text_field.dart';
 import '../widgets/tv_tile.dart';
 import 'tmd_details_screen.dart';
+import '../l10n/app_localizations.dart';
 
 enum _FtpProtocol { ftp, sftp }
 
@@ -117,14 +118,18 @@ class _FtpScreenState extends State<FtpScreen> {
     final service = TmdService.instance;
     for (final entry in entries) {
       if (entry.isDirectory) continue;
-      service.resolve(VideoItem(
-        id: 'ftp_${server.id}${entry.path}',
-        title: entry.name,
-        uri: '',
-        resumeKey: 'ftp_${server.id}${entry.path}',
-        duration: Duration.zero,
-        sizeBytes: entry.size,
-      )).catchError((_) => null as TmdMeta?);
+      service
+          .resolve(
+            VideoItem(
+              id: 'ftp_${server.id}${entry.path}',
+              title: entry.name,
+              uri: '',
+              resumeKey: 'ftp_${server.id}${entry.path}',
+              duration: Duration.zero,
+              sizeBytes: entry.size,
+            ),
+          )
+          .catchError((_) => null as TmdMeta?);
     }
   }
 
@@ -137,7 +142,10 @@ class _FtpScreenState extends State<FtpScreen> {
     if (server == null) return;
 
     final scheme = server.isSftp ? 'sftp' : 'ftp';
-    final encodedPath = entry.path.split('/').map(Uri.encodeComponent).join('/');
+    final encodedPath = entry.path
+        .split('/')
+        .map(Uri.encodeComponent)
+        .join('/');
     // FtpDataSource resolves ftp://<serverId>/<path> to saved credentials.
     final uri = '$scheme://${server.id}$encodedPath';
 
@@ -158,9 +166,7 @@ class _FtpScreenState extends State<FtpScreen> {
 
     if (!mounted) return;
     await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => TmdDetailsScreen(video: item),
-      ),
+      MaterialPageRoute<void>(builder: (_) => TmdDetailsScreen(video: item)),
     );
   }
 
@@ -192,7 +198,7 @@ class _FtpScreenState extends State<FtpScreen> {
     if (!mounted) return;
     ScaffoldMessenger.of(
       context,
-    ).showSnackBar(SnackBar(content: Text('Removed ${server.name}')));
+    ).showSnackBar(SnackBar(content: AppText('Removed ${server.name}')));
     _loadServers();
   }
 
@@ -209,10 +215,12 @@ class _FtpScreenState extends State<FtpScreen> {
     final browsing = _browsing;
     return Scaffold(
       appBar: AppBar(
-        title: Text(browsing == null ? 'FTP / SFTP' : _breadcrumbTitle(browsing)),
+        title: AppText(
+          browsing == null ? 'FTP / SFTP' : _breadcrumbTitle(browsing),
+        ),
         leading: browsing != null
             ? IconButton(
-                tooltip: 'Up',
+                tooltip: context.tr('Up'),
                 icon: const Icon(Icons.arrow_back),
                 onPressed: _goUp,
               )
@@ -220,7 +228,7 @@ class _FtpScreenState extends State<FtpScreen> {
         actions: [
           if (browsing != null)
             IconButton(
-              tooltip: 'Server list',
+              tooltip: context.tr('Server list'),
               icon: const Icon(Icons.dns_outlined),
               onPressed: () => setState(() {
                 _browsing = null;
@@ -237,14 +245,14 @@ class _FtpScreenState extends State<FtpScreen> {
                 FloatingActionButton(
                   heroTag: 'ftp_refresh',
                   onPressed: _loadServers,
-                  tooltip: 'Refresh',
+                  tooltip: context.tr('Refresh'),
                   child: const Icon(Icons.refresh),
                 ),
                 const SizedBox(height: 12),
                 FloatingActionButton(
                   heroTag: 'ftp_add',
                   onPressed: _addServer,
-                  tooltip: 'Add server',
+                  tooltip: context.tr('Add server'),
                   child: const Icon(Icons.add),
                 ),
               ],
@@ -271,7 +279,7 @@ class _FtpScreenState extends State<FtpScreen> {
             children: [
               const Icon(Icons.cloud_off_outlined, size: 64),
               const SizedBox(height: 16),
-              Text(
+              AppText(
                 'Error: $_error',
                 textAlign: TextAlign.center,
                 style: TextStyle(color: Theme.of(context).colorScheme.error),
@@ -279,7 +287,7 @@ class _FtpScreenState extends State<FtpScreen> {
               const SizedBox(height: 16),
               FilledButton(
                 onPressed: _atBrowseRoot ? _loadServers : _goUp,
-                child: const Text('Retry'),
+                child: const AppText('Retry'),
               ),
             ],
           ),
@@ -291,7 +299,7 @@ class _FtpScreenState extends State<FtpScreen> {
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(24),
-          child: Text(
+          child: AppText(
             'Nothing here',
             textAlign: TextAlign.center,
             style: Theme.of(context).textTheme.titleMedium,
@@ -307,7 +315,11 @@ class _FtpScreenState extends State<FtpScreen> {
         final meta = entry.isDirectory || server == null
             ? null
             : TmdService.instance.metaFor('ftp_${server.id}${entry.path}');
-        return _FtpTile(entry: entry, tmdbMeta: meta, onTap: () => _openEntry(entry));
+        return _FtpTile(
+          entry: entry,
+          tmdbMeta: meta,
+          onTap: () => _openEntry(entry),
+        );
       },
     );
   }
@@ -320,10 +332,7 @@ class _FtpScreenState extends State<FtpScreen> {
           children: [
             Icon(Icons.cloud_outlined, size: 48, color: Colors.white38),
             SizedBox(height: 12),
-            Text(
-              'Nothing yet',
-              style: TextStyle(color: Colors.white54),
-            ),
+            AppText('Nothing yet', style: TextStyle(color: Colors.white54)),
           ],
         ),
       );
@@ -336,13 +345,15 @@ class _FtpScreenState extends State<FtpScreen> {
           const _SectionHeader('Saved servers'),
           for (final server in _servers)
             TvTile(
-              leading: Icon(server.isSftp ? Icons.lock_outline : Icons.folder_outlined),
-              title: Text(
+              leading: Icon(
+                server.isSftp ? Icons.lock_outline : Icons.folder_outlined,
+              ),
+              title: AppText(
                 server.name,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
-              subtitle: Text(
+              subtitle: AppText(
                 server.subtitle,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
@@ -356,8 +367,8 @@ class _FtpScreenState extends State<FtpScreen> {
                   }
                 },
                 itemBuilder: (_) => const [
-                  PopupMenuItem(value: 'edit', child: Text('Edit')),
-                  PopupMenuItem(value: 'delete', child: Text('Delete')),
+                  PopupMenuItem(value: 'edit', child: AppText('Edit')),
+                  PopupMenuItem(value: 'delete', child: AppText('Delete')),
                 ],
               ),
               onTap: () => _openServer(server),
@@ -377,7 +388,7 @@ class _SectionHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
-      child: Text(
+      child: AppText(
         label,
         style: Theme.of(context).textTheme.labelLarge?.copyWith(
           color: Theme.of(context).colorScheme.primary,
@@ -424,8 +435,8 @@ class _FtpTile extends StatelessWidget {
       leading: posterUrl != null
           ? _Poster(posterUrl: posterUrl)
           : Icon(icon, color: color),
-      title: Text(entry.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-      subtitle: subtitle == null ? null : Text(subtitle),
+      title: AppText(entry.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+      subtitle: subtitle == null ? null : AppText(subtitle),
       trailing: entry.isDirectory ? const Icon(Icons.chevron_right) : null,
       onTap: onTap,
     );
@@ -754,30 +765,33 @@ class _ServerFormDialogState extends State<_ServerFormDialog> {
         OutlinedButton.icon(
           style: OutlinedButton.styleFrom(
             side: BorderSide(color: theme.colorScheme.outline),
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
           ),
           onPressed: _testing ? null : _test,
           icon: _testing
               ? const SizedBox(
                   width: 14,
                   height: 14,
-                  child: CircularProgressIndicator(strokeWidth: 2))
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
               : const Icon(Icons.wifi_tethering, size: 16),
-          label: const Text('Test'),
+          label: const AppText('Test'),
         ),
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
+          child: const AppText('Cancel'),
         ),
         FilledButton.icon(
           style: FilledButton.styleFrom(
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
           ),
           onPressed: _save,
           icon: const Icon(Icons.check_rounded, size: 16),
-          label: const Text('Save'),
+          label: const AppText('Save'),
         ),
       ],
     );
@@ -791,7 +805,9 @@ class _ServerFormDialogState extends State<_ServerFormDialog> {
     required VoidCallback onTap,
   }) {
     final theme = Theme.of(context);
-    final color = selected ? theme.colorScheme.primary : theme.colorScheme.outline;
+    final color = selected
+        ? theme.colorScheme.primary
+        : theme.colorScheme.outline;
     return InkWell(
       borderRadius: BorderRadius.circular(12),
       onTap: onTap,
@@ -801,7 +817,9 @@ class _ServerFormDialogState extends State<_ServerFormDialog> {
         decoration: BoxDecoration(
           color: selected
               ? theme.colorScheme.primary.withValues(alpha: 0.15)
-              : theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.35),
+              : theme.colorScheme.surfaceContainerHighest.withValues(
+                  alpha: 0.35,
+                ),
           borderRadius: BorderRadius.circular(12),
           border: Border.all(color: color, width: selected ? 1.4 : 1),
         ),
@@ -810,7 +828,7 @@ class _ServerFormDialogState extends State<_ServerFormDialog> {
           children: [
             Icon(icon, size: 17, color: color),
             const SizedBox(width: 8),
-            Text(
+            AppText(
               label,
               style: TextStyle(
                 fontWeight: FontWeight.w600,

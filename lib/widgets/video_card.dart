@@ -9,6 +9,7 @@ import '../services/thumbnail_store.dart';
 import '../services/tmdb_client.dart';
 import '../utils/codec_info.dart';
 import '../utils/tv_helper.dart';
+import '../l10n/app_localizations.dart';
 
 class VideoCard extends StatefulWidget {
   const VideoCard({
@@ -157,10 +158,9 @@ class _VideoCardState extends State<VideoCard> {
                     ),
                     boxShadow: [
                       BoxShadow(
-                        color: Theme.of(context)
-                            .colorScheme
-                            .primary
-                            .withValues(alpha: 0.4),
+                        color: Theme.of(
+                          context,
+                        ).colorScheme.primary.withValues(alpha: 0.4),
                         blurRadius: 12,
                         spreadRadius: 2,
                       ),
@@ -197,7 +197,8 @@ class _VideoCardState extends State<VideoCard> {
                               // Play glyph only when there is no art at all —
                               // embedded cover-art or TMDB backdrop replaces
                               // it. Hidden while the art lookup is in flight.
-                              child: (!_thumbChecked ||
+                              child:
+                                  (!_thumbChecked ||
                                       (_thumb == null &&
                                           tmdbMeta?.movie.backdropUrl() ==
                                               null))
@@ -223,15 +224,18 @@ class _VideoCardState extends State<VideoCard> {
                                   const SizedBox.shrink(),
                               loadingBuilder: (context, child, progress) =>
                                   progress == null
-                                      ? child
-                                      : const SizedBox.shrink(),
+                                  ? child
+                                  : const SizedBox.shrink(),
                             ),
                           if (video.hdrFormat != HdrFormat.sdr)
                             Positioned(
                               top: 8,
                               left: 8,
                               child: _Badge(
-                                label: _hdrShortLabel(video.hdrFormat, video.hdrHint),
+                                label: _hdrShortLabel(
+                                  video.hdrFormat,
+                                  video.hdrHint,
+                                ),
                                 background: _hdrColor(video.hdrFormat),
                               ),
                             ),
@@ -277,43 +281,38 @@ class _VideoCardState extends State<VideoCard> {
                           mainAxisSize: MainAxisSize.max,
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(
+                            AppText(
                               (tmdbMeta?.movie.title.isNotEmpty ?? false)
                                   ? tmdbMeta!.movie.title
                                   : video.title,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
-                              style: Theme.of(context)
-                                  .textTheme
-                                  .titleSmall
+                              style: Theme.of(context).textTheme.titleSmall
                                   ?.copyWith(fontWeight: FontWeight.w600),
                             ),
                             const SizedBox(height: 2),
                             if (subtitle != null)
                               Flexible(
-                                child: Text(
+                                child: AppText(
                                   subtitle,
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
-                                  style: Theme.of(context)
-                                      .textTheme
-                                      .bodySmall
+                                  style: Theme.of(context).textTheme.bodySmall
                                       ?.copyWith(
-                                          color: colorScheme.onSurfaceVariant),
+                                        color: colorScheme.onSurfaceVariant,
+                                      ),
                                 ),
                               )
-else
-                                Flexible(
-                                  child: Text(
-                                    _subtitleLine(video, tmdbMeta),
+                            else
+                              Flexible(
+                                child: AppText(
+                                  _subtitleLine(video, tmdbMeta),
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
-                                  style: Theme.of(context)
-                                      .textTheme
-                                      .bodySmall
+                                  style: Theme.of(context).textTheme.bodySmall
                                       ?.copyWith(
-                                          color:
-                                              colorScheme.onSurfaceVariant),
+                                        color: colorScheme.onSurfaceVariant,
+                                      ),
                                 ),
                               ),
                           ],
@@ -354,7 +353,7 @@ class _Badge extends StatelessWidget {
         color: background,
         borderRadius: BorderRadius.circular(4),
       ),
-      child: Text(
+      child: AppText(
         label,
         style: const TextStyle(
           color: Colors.white,

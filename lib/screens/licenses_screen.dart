@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../l10n/app_localizations.dart';
+
 class _LicenseEntry {
   const _LicenseEntry(this.name, this.license, this.url);
 
@@ -9,29 +11,57 @@ class _LicenseEntry {
 }
 
 const List<_LicenseEntry> _entries = [
-  _LicenseEntry('DreamPlayer (this app)', 'GNU General Public License v3.0',
-      'https://www.gnu.org/licenses/gpl-3.0.html'),
-  _LicenseEntry('AndroidX Media3 / ExoPlayer', 'Apache License 2.0',
-      'https://github.com/androidx/media'),
-  _LicenseEntry('nextlib-media3ext (Android FFmpeg extension)', 'GNU GPL v3.0',
-      'https://github.com/anilbeesetti/nextlib'),
-  _LicenseEntry('AetherEngine (iOS engine)',
-      'LGPL-3.0 + Apple Store/DRM exception',
-      'https://github.com/superuser404notfound/AetherEngine'),
-  _LicenseEntry('FFmpeg frameworks (iOS)',
-      'LGPL-2.1 or later (no GPL components)',
-      'https://github.com/superuser404notfound/FFmpegBuild'),
-  _LicenseEntry('SMBClient (SMB2/3, via AetherEngineSMB for WebDAV)',
-      'MIT', 'https://github.com/kishikawakatsumi/SMBClient'),
+  _LicenseEntry(
+    'DreamPlayer (this app)',
+    'GNU General Public License v3.0',
+    'https://www.gnu.org/licenses/gpl-3.0.html',
+  ),
+  _LicenseEntry(
+    'AndroidX Media3 / ExoPlayer',
+    'Apache License 2.0',
+    'https://github.com/androidx/media',
+  ),
+  _LicenseEntry(
+    'nextlib-media3ext (Android FFmpeg extension)',
+    'GNU GPL v3.0',
+    'https://github.com/anilbeesetti/nextlib',
+  ),
+  _LicenseEntry(
+    'AetherEngine (iOS engine)',
+    'LGPL-3.0 + Apple Store/DRM exception',
+    'https://github.com/superuser404notfound/AetherEngine',
+  ),
+  _LicenseEntry(
+    'FFmpeg frameworks (iOS)',
+    'LGPL-2.1 or later (no GPL components)',
+    'https://github.com/superuser404notfound/FFmpegBuild',
+  ),
+  _LicenseEntry(
+    'SMBClient (SMB2/3, via AetherEngineSMB for WebDAV)',
+    'MIT',
+    'https://github.com/kishikawakatsumi/SMBClient',
+  ),
   _LicenseEntry('Flutter SDK / Dart', 'BSD 3-Clause', 'https://flutter.dev'),
-  _LicenseEntry('permission_handler', 'MIT',
-      'https://pub.dev/packages/permission_handler'),
-  _LicenseEntry('flutter_displaymode', 'MIT',
-      'https://pub.dev/packages/flutter_displaymode'),
-  _LicenseEntry('shared_preferences', 'BSD 3-Clause',
-      'https://pub.dev/packages/shared_preferences'),
-  _LicenseEntry('cupertino_icons', 'MIT',
-      'https://pub.dev/packages/cupertino_icons'),
+  _LicenseEntry(
+    'permission_handler',
+    'MIT',
+    'https://pub.dev/packages/permission_handler',
+  ),
+  _LicenseEntry(
+    'flutter_displaymode',
+    'MIT',
+    'https://pub.dev/packages/flutter_displaymode',
+  ),
+  _LicenseEntry(
+    'shared_preferences',
+    'BSD 3-Clause',
+    'https://pub.dev/packages/shared_preferences',
+  ),
+  _LicenseEntry(
+    'cupertino_icons',
+    'MIT',
+    'https://pub.dev/packages/cupertino_icons',
+  ),
 ];
 
 /// Lists the open-source components DreamPlayer is built from and their
@@ -44,14 +74,14 @@ class LicensesScreen extends StatelessWidget {
     final theme = Theme.of(context);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Open-source licenses')),
+      appBar: AppBar(title: const AppText('Open-source licenses')),
       body: SafeArea(
         child: ListView(
           padding: const EdgeInsets.only(bottom: 24),
           children: [
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-              child: Text(
+              child: AppText(
                 'DreamPlayer is free software released under the GNU General '
                 'Public License v3.0 (or any later version). It is built from '
                 'the open-source components below; their full license texts '
@@ -66,8 +96,8 @@ class LicensesScreen extends StatelessWidget {
             for (final entry in _entries)
               ListTile(
                 leading: const Icon(Icons.description_outlined),
-                title: Text(entry.name),
-                subtitle: Text(entry.license),
+                title: AppText(entry.name),
+                subtitle: AppText(entry.license),
                 onTap: () => _openUrl(context, entry.url),
               ),
           ],
@@ -77,8 +107,6 @@ class LicensesScreen extends StatelessWidget {
   }
 
   void _openUrl(BuildContext context, String url) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(url)),
-    );
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: AppText(url)));
   }
 }

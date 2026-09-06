@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../models/video_item.dart';
+import '../library/unified_library_service.dart';
 import '../services/library_folders.dart';
 import '../services/tmdb_client.dart';
 import '../services/webdav_client.dart';
@@ -11,6 +12,7 @@ import '../widgets/tv_overscan.dart';
 import '../widgets/tv_text_field.dart';
 import '../widgets/tv_tile.dart';
 import 'tmd_details_screen.dart';
+import '../l10n/app_localizations.dart';
 
 enum _WebDavProtocol { http, https }
 
@@ -23,7 +25,9 @@ String _encodePath(String path) =>
 /// WebDAV browser: saved servers -> folders -> videos. Playback streams the
 /// plain HTTP file URL to the player with the server's Basic auth header.
 class WebDavScreen extends StatefulWidget {
-  const WebDavScreen({super.key});
+  const WebDavScreen({super.key, this.initialFolder});
+
+  final LibraryFolder? initialFolder;
 
   @override
   State<WebDavScreen> createState() => _WebDavScreenState();
@@ -38,6 +42,8 @@ class _WebDavScreenState extends State<WebDavScreen> {
   List<WebDavEntry> _entries = const [];
   bool _loading = true;
   String? _error;
+  final Set<String> _selectedPaths = {};
+  bool _identifying = false;
 
   bool get _atBrowseRoot => _browsing == null || _path == '/';
 
@@ -45,7 +51,22 @@ class _WebDavScreenState extends State<WebDavScreen> {
   void initState() {
     super.initState();
     TmdService.instance.addListener(_onMetadataChanged);
-    _loadServers();
+    _initialize();
+  }
+
+  Future<void> _initialize() async {
+    await _loadServers();
+    final folder = widget.initialFolder;
+    if (!mounted || folder == null) return;
+    final server = _servers
+        .where((s) => s.id == folder.networkServerId)
+        .firstOrNull;
+    if (server == null) {
+      setState(() => _error = '来源服务器已移除，请重新添加');
+      return;
+    }
+    _browsing = server;
+    await _loadDirectory(folder.networkPath ?? '/');
   }
 
   @override
@@ -103,9 +124,9 @@ class _WebDavScreenState extends State<WebDavScreen> {
       setState(() {
         _path = path;
         _entries = entries;
+        _selectedPaths.clear();
         _loading = false;
       });
-      _prefetchTmdbMeta(entries);
     } on PlatformException catch (e) {
       if (mounted) {
         setState(() {
@@ -116,21 +137,64 @@ class _WebDavScreenState extends State<WebDavScreen> {
     }
   }
 
-  /// Best-effort TMDB prefetch for the current folder's video files.
-  void _prefetchTmdbMeta(List<WebDavEntry> entries) {
+  Future<void> _identifySelected() async {
     final server = _browsing;
-    if (server == null) return;
+    if (server == null || _identifying) return;
+    final selected = _entries
+        .where((e) => e.isDirectory && _selectedPaths.contains(e.path))
+        .toList();
+    setState(() => _identifying = true);
     final service = TmdService.instance;
-    for (final entry in entries) {
-      if (entry.isDirectory) continue;
-      service.resolve(VideoItem(
-        id: 'webdav_${server.id}${entry.path}',
-        title: entry.name,
-        uri: '',
-        resumeKey: 'webdav_${server.id}${entry.path}',
-        duration: Duration.zero,
-        sizeBytes: entry.size,
-      )).catchError((_) => null as TmdMeta?);
+    var successes = 0;
+    final matchedFolders = <LibraryFolder>[];
+    final failures = <String>[];
+    try {
+      for (final entry in selected) {
+        final path = entry.path.replaceAll(RegExp(r'/+$'), '');
+        final folder = LibraryFolder(
+          id: 'webdav_${server.id}_${path.hashCode}',
+          name: entry.name,
+          path: 'webdav:${server.id}$path',
+          addedAt: DateTime.now(),
+          source: LibraryFolderSource.webdav,
+          networkServerId: server.id,
+          networkPath: path,
+          networkLabel: server.name,
+        );
+        try {
+          final match = await service.resolveFolder(
+            folder.metadataKey,
+            entry.name,
+          );
+          if (match == null) {
+            failures.add('${entry.name}：TMDB 没有找到可信匹配');
+            continue;
+          }
+          await LibraryFoldersStore.add(folder);
+          matchedFolders.add(folder);
+          successes++;
+          if (mounted) setState(() => _selectedPaths.remove(entry.path));
+        } catch (error) {
+          // Keep failed folders selected so the user can retry them.
+          failures.add('${entry.name}：$error');
+        }
+      }
+      if (matchedFolders.isNotEmpty) {
+        await UnifiedLibraryService.instance.refresh(matchedFolders);
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _identifying = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: AppText(
+              failures.isEmpty
+                  ? '已识别 $successes/${selected.length} 个文件夹，并建立影视库索引'
+                  : '已识别 $successes/${selected.length} 个文件夹；${failures.first}',
+            ),
+          ),
+        );
+      }
     }
   }
 
@@ -226,7 +290,11 @@ class _WebDavScreenState extends State<WebDavScreen> {
     await LibraryFoldersStore.add(folder);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Bookmarked $folderName to Home (WebDAV · ${server.name})')),
+        SnackBar(
+          content: AppText(
+            'Bookmarked $folderName to Home (WebDAV · ${server.name})',
+          ),
+        ),
       );
     }
   }
@@ -240,7 +308,7 @@ class _WebDavScreenState extends State<WebDavScreen> {
     if (!mounted) return;
     ScaffoldMessenger.of(
       context,
-    ).showSnackBar(SnackBar(content: Text('Removed ${server.name}')));
+    ).showSnackBar(SnackBar(content: AppText('Removed ${server.name}')));
     _loadServers();
   }
 
@@ -257,24 +325,33 @@ class _WebDavScreenState extends State<WebDavScreen> {
     final browsing = _browsing;
     return Scaffold(
       appBar: AppBar(
-        title: Text(browsing == null ? 'WebDAV' : _breadcrumbTitle(browsing)),
+        title: AppText(
+          browsing == null ? 'WebDAV' : _breadcrumbTitle(browsing),
+        ),
         leading: browsing != null
             ? IconButton(
-                tooltip: 'Up',
+                tooltip: context.tr('Up'),
                 icon: const Icon(Icons.arrow_back),
                 onPressed: _goUp,
               )
             : null,
         actions: [
+          if (_selectedPaths.isNotEmpty)
+            TextButton(
+              onPressed: _identifying ? null : _identifySelected,
+              child: AppText(
+                _identifying ? '正在识别…' : '自动识别 (${_selectedPaths.length})',
+              ),
+            ),
           if (browsing != null && !_atBrowseRoot)
             IconButton(
-              tooltip: 'Bookmark this folder to Home',
+              tooltip: context.tr('Bookmark this folder to Home'),
               icon: const Icon(Icons.bookmark_add_outlined),
               onPressed: _bookmarkCurrentFolder,
             ),
           if (browsing != null)
             IconButton(
-              tooltip: 'Server list',
+              tooltip: context.tr('Server list'),
               icon: const Icon(Icons.dns_outlined),
               onPressed: () => setState(() {
                 _browsing = null;
@@ -291,14 +368,14 @@ class _WebDavScreenState extends State<WebDavScreen> {
                 FloatingActionButton(
                   heroTag: 'webdav_refresh',
                   onPressed: _loadServers,
-                  tooltip: 'Refresh',
+                  tooltip: context.tr('Refresh'),
                   child: const Icon(Icons.refresh),
                 ),
                 const SizedBox(height: 12),
                 FloatingActionButton(
                   heroTag: 'webdav_add',
                   onPressed: _addServer,
-                  tooltip: 'Add server',
+                  tooltip: context.tr('Add server'),
                   child: const Icon(Icons.add),
                 ),
               ],
@@ -325,7 +402,7 @@ class _WebDavScreenState extends State<WebDavScreen> {
             children: [
               const Icon(Icons.cloud_off_outlined, size: 64),
               const SizedBox(height: 16),
-              Text(
+              AppText(
                 'Error: $_error',
                 textAlign: TextAlign.center,
                 style: TextStyle(color: Theme.of(context).colorScheme.error),
@@ -333,7 +410,7 @@ class _WebDavScreenState extends State<WebDavScreen> {
               const SizedBox(height: 16),
               FilledButton(
                 onPressed: _atBrowseRoot ? _loadServers : _goUp,
-                child: const Text('Retry'),
+                child: const AppText('Retry'),
               ),
             ],
           ),
@@ -345,7 +422,7 @@ class _WebDavScreenState extends State<WebDavScreen> {
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(24),
-          child: Text(
+          child: AppText(
             'Nothing here',
             textAlign: TextAlign.center,
             style: Theme.of(context).textTheme.titleMedium,
@@ -360,9 +437,26 @@ class _WebDavScreenState extends State<WebDavScreen> {
         final server = _browsing;
         final meta = entry.isDirectory || server == null
             ? null
-            : TmdService.instance
-                .metaFor('webdav_${server.id}${entry.path}');
-        return _WebDavTile(entry: entry, tmdbMeta: meta, onTap: () => _openEntry(entry));
+            : TmdService.instance.metaFor('webdav_${server.id}${entry.path}');
+        return _WebDavTile(
+          entry: entry,
+          tmdbMeta: meta,
+          selection: entry.isDirectory
+              ? Checkbox(
+                  value: _selectedPaths.contains(entry.path),
+                  onChanged: _identifying
+                      ? null
+                      : (value) => setState(() {
+                          if (value == true) {
+                            _selectedPaths.add(entry.path);
+                          } else {
+                            _selectedPaths.remove(entry.path);
+                          }
+                        }),
+                )
+              : null,
+          onTap: () => _openEntry(entry),
+        );
       },
     );
   }
@@ -375,10 +469,7 @@ class _WebDavScreenState extends State<WebDavScreen> {
           children: [
             Icon(Icons.cloud_outlined, size: 48, color: Colors.white38),
             SizedBox(height: 12),
-              Text(
-                'Nothing yet',
-                style: TextStyle(color: Colors.white54),
-              ),
+            AppText('Nothing yet', style: TextStyle(color: Colors.white54)),
           ],
         ),
       );
@@ -392,12 +483,12 @@ class _WebDavScreenState extends State<WebDavScreen> {
           for (final server in _servers)
             TvTile(
               leading: const Icon(Icons.cloud),
-              title: Text(
+              title: AppText(
                 server.name,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
-              subtitle: Text(
+              subtitle: AppText(
                 server.subtitle,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
@@ -411,8 +502,8 @@ class _WebDavScreenState extends State<WebDavScreen> {
                   }
                 },
                 itemBuilder: (_) => const [
-                  PopupMenuItem(value: 'edit', child: Text('Edit')),
-                  PopupMenuItem(value: 'delete', child: Text('Delete')),
+                  PopupMenuItem(value: 'edit', child: AppText('Edit')),
+                  PopupMenuItem(value: 'delete', child: AppText('Delete')),
                 ],
               ),
               onTap: () => _openServer(server),
@@ -432,7 +523,7 @@ class _SectionHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
-      child: Text(
+      child: AppText(
         label,
         style: Theme.of(context).textTheme.labelLarge?.copyWith(
           color: Theme.of(context).colorScheme.primary,
@@ -448,11 +539,13 @@ class _WebDavTile extends StatelessWidget {
     required this.entry,
     required this.tmdbMeta,
     required this.onTap,
+    this.selection,
   });
 
   final WebDavEntry entry;
   final TmdMeta? tmdbMeta;
   final VoidCallback onTap;
+  final Widget? selection;
 
   static String _sizeLabel(int bytes) {
     if (bytes <= 0) return '';
@@ -479,9 +572,9 @@ class _WebDavTile extends StatelessWidget {
       leading: posterUrl != null
           ? _Poster(posterUrl: posterUrl)
           : Icon(icon, color: color),
-      title: Text(entry.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-      subtitle: subtitle == null ? null : Text(subtitle),
-      trailing: entry.isDirectory ? const Icon(Icons.chevron_right) : null,
+      title: AppText(entry.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+      subtitle: subtitle == null ? null : AppText(subtitle),
+      trailing: selection,
       onTap: onTap,
     );
   }
@@ -807,7 +900,8 @@ class _ServerFormDialogState extends State<_ServerFormDialog> {
                       ServerResultBanner(
                         success: false,
                         margin: const EdgeInsets.only(top: 10),
-                        message: 'HTTP sends the password insecurely. Use '
+                        message:
+                            'HTTP sends the password insecurely. Use '
                             'HTTPS when connecting over the internet.',
                       ),
                     if (_isHttps)
@@ -816,9 +910,11 @@ class _ServerFormDialogState extends State<_ServerFormDialog> {
                         controlAffinity: ListTileControlAffinity.leading,
                         dense: true,
                         activeThumbColor: theme.colorScheme.primary,
-                        title: const Text('Self-signed certificate',
-                            style: TextStyle(fontSize: 14)),
-                        subtitle: const Text(
+                        title: const AppText(
+                          'Self-signed certificate',
+                          style: TextStyle(fontSize: 14),
+                        ),
+                        subtitle: const AppText(
                           'Trust HTTPS servers without a CA certificate '
                           '(NAS, Nextcloud, etc.)',
                           style: TextStyle(fontSize: 12),
@@ -843,30 +939,33 @@ class _ServerFormDialogState extends State<_ServerFormDialog> {
         OutlinedButton.icon(
           style: OutlinedButton.styleFrom(
             side: BorderSide(color: theme.colorScheme.outline),
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
           ),
           onPressed: _testing ? null : _test,
           icon: _testing
               ? const SizedBox(
                   width: 14,
                   height: 14,
-                  child: CircularProgressIndicator(strokeWidth: 2))
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
               : const Icon(Icons.wifi_tethering, size: 16),
-          label: const Text('Test'),
+          label: const AppText('Test'),
         ),
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
+          child: const AppText('Cancel'),
         ),
         FilledButton.icon(
           style: FilledButton.styleFrom(
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
           ),
           onPressed: _save,
           icon: const Icon(Icons.check_rounded, size: 16),
-          label: const Text('Save'),
+          label: const AppText('Save'),
         ),
       ],
     );
@@ -881,7 +980,9 @@ class _ServerFormDialogState extends State<_ServerFormDialog> {
     required VoidCallback onTap,
   }) {
     final theme = Theme.of(context);
-    final color = selected ? theme.colorScheme.primary : theme.colorScheme.outline;
+    final color = selected
+        ? theme.colorScheme.primary
+        : theme.colorScheme.outline;
     return InkWell(
       borderRadius: BorderRadius.circular(12),
       onTap: onTap,
@@ -891,7 +992,9 @@ class _ServerFormDialogState extends State<_ServerFormDialog> {
         decoration: BoxDecoration(
           color: selected
               ? theme.colorScheme.primary.withValues(alpha: 0.15)
-              : theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.35),
+              : theme.colorScheme.surfaceContainerHighest.withValues(
+                  alpha: 0.35,
+                ),
           borderRadius: BorderRadius.circular(12),
           border: Border.all(color: color, width: selected ? 1.4 : 1),
         ),
@@ -900,7 +1003,7 @@ class _ServerFormDialogState extends State<_ServerFormDialog> {
           children: [
             Icon(icon, size: 17, color: color),
             const SizedBox(width: 8),
-            Text(
+            AppText(
               label,
               style: TextStyle(
                 fontWeight: FontWeight.w600,

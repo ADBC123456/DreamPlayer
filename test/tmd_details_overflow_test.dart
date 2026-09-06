@@ -42,18 +42,24 @@ Future<void> _pumpAndCheck(
     MaterialApp(
       home: TmdDetailsScreen(video: video),
       builder: (context, child) => MediaQuery(
-        data: MediaQuery.of(context).copyWith(
-          textScaler: TextScaler.linear(textScale),
-        ),
+        data: MediaQuery.of(
+          context,
+        ).copyWith(textScaler: TextScaler.linear(textScale)),
         child: child!,
       ),
     ),
   );
-  await tester.pumpAndSettle();
+  // These are layout assertions. Network poster/still streams can keep
+  // scheduling image frames indefinitely when this file follows another
+  // widget test, so pump a bounded pair of frames instead of waiting on
+  // unrelated network completion.
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 500));
   expect(
     tester.takeException(),
     isNull,
-    reason: 'overflow at ${physical.width}x${physical.height}@3'
+    reason:
+        'overflow at ${physical.width}x${physical.height}@3'
         ' textScale=$textScale',
   );
 }
@@ -61,6 +67,7 @@ Future<void> _pumpAndCheck(
 void main() {
   testWidgets('matched state has no overflow at device sizes', (tester) async {
     SharedPreferences.setMockInitialValues({});
+    TmdStore.resetWriteQueueForTesting();
     await TmdStore.save(
       _video.path!,
       const TmdMeta(
@@ -68,7 +75,8 @@ void main() {
           id: 1,
           title: 'Dolby Core Universe',
           year: 2024,
-          overview: 'A very long overview that keeps going on and on and on '
+          overview:
+              'A very long overview that keeps going on and on and on '
               'and on and on and on and on and on and on and on and on.',
           voteAverage: 8.2,
           posterPath: '/poster.jpg',
@@ -76,7 +84,8 @@ void main() {
         ),
         details: TmdDetails(
           title: 'Dolby Core Universe',
-          overview: 'A very long overview that keeps going on and on and on '
+          overview:
+              'A very long overview that keeps going on and on and on '
               'and on and on and on and on and on and on and on and on.',
           voteAverage: 8.2,
           voteCount: 10,
@@ -94,28 +103,21 @@ void main() {
 
     await _pumpAndCheck(tester, _video, const Size(1080, 2400)); // portrait
     await _pumpAndCheck(tester, _video, const Size(2400, 1080)); // landscape
-    await _pumpAndCheck(
-      tester,
-      _video,
-      const Size(2400, 1080),
-      textScale: 1.3,
-    );
+    await _pumpAndCheck(tester, _video, const Size(2400, 1080), textScale: 1.3);
   });
 
   testWidgets('no-match/error state has no overflow at device sizes', (
     tester,
   ) async {
     SharedPreferences.setMockInitialValues({});
+    TmdStore.resetWriteQueueForTesting();
     // No metadata seeded: the no-match panel shows file info + Get Info button.
     await _pumpAndCheck(tester, _videoNoMatch, const Size(1080, 2400));
     await _pumpAndCheck(tester, _videoNoMatch, const Size(2400, 1080));
 
     // The no-match panel shows the filename and a Get Info button.
     expect(find.textContaining('No metadata loaded'), findsOneWidget);
-    expect(
-      find.widgetWithText(FilledButton, 'Get Info'),
-      findsOneWidget,
-    );
+    expect(find.widgetWithText(FilledButton, 'Get Info'), findsOneWidget);
     expect(find.textContaining('API key'), findsNothing);
     expect(find.textContaining('metadata from TMDB'), findsNothing);
   });
@@ -124,6 +126,7 @@ void main() {
     tester,
   ) async {
     SharedPreferences.setMockInitialValues({});
+    TmdStore.resetWriteQueueForTesting();
     // Seed a TV show whose season/episode data (cast, guest stars, stills)
     // exercises the single-episode sections: the images strip, the Episode
     // cast + Guest stars rows, and the Remove info/Fix match action wrap.
@@ -141,7 +144,8 @@ void main() {
         ),
         details: TmdDetails(
           title: 'House',
-          overview: 'A very long show overview that keeps going on and on and '
+          overview:
+              'A very long show overview that keeps going on and on and '
               'on and on and on and on and on and on and on and on.',
           runtimeMinutes: 45,
           genres: ['Drama', 'Mystery'],
@@ -155,7 +159,8 @@ void main() {
               TmdEpisode(
                 episodeNumber: 4,
                 name: 'Humble',
-                overview: 'A very long episode overview that keeps going on '
+                overview:
+                    'A very long episode overview that keeps going on '
                     'and on and on and on and on and on and on and on.',
                 stillPath: '/stills/e4.jpg',
                 airDate: '2005-11-01',
@@ -198,6 +203,7 @@ void main() {
   testWidgets('saved position shows both Resume and Watch from beginning '
       '(no overflow at device sizes)', (tester) async {
     SharedPreferences.setMockInitialValues({});
+    TmdStore.resetWriteQueueForTesting();
     await TmdStore.save(
       _video.path!,
       const TmdMeta(
@@ -213,7 +219,11 @@ void main() {
       ),
     );
     // Resume key for `_video` is its path (no explicit resumeKey).
-    await ResumeStore.save(_video.path!, const Duration(minutes: 12, seconds: 30), engine: 'media3');
+    await ResumeStore.save(
+      _video.path!,
+      const Duration(minutes: 12, seconds: 30),
+      engine: 'media3',
+    );
 
     tester.view.physicalSize = const Size(1080, 2400);
     tester.view.devicePixelRatio = 3;
@@ -237,9 +247,7 @@ void main() {
     // startFromBeginning flag instead of resuming.
     await tester.tap(find.byIcon(Icons.replay));
     await tester.pumpAndSettle();
-    final screen = tester.widget<PlayerScreen>(
-      find.byType(PlayerScreen),
-    );
+    final screen = tester.widget<PlayerScreen>(find.byType(PlayerScreen));
     expect(screen.startFromBeginning, isTrue);
     addTearDown(() async {
       // Return to the details screen state after the incidental player push.

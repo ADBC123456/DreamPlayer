@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:danmaku_canvas/danmaku_canvas.dart' as danmaku_canvas;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -12,6 +13,11 @@ import 'package:permission_handler/permission_handler.dart';
 
 import '../models/hdr_format.dart';
 import '../models/video_item.dart';
+import '../danmaku/identity/video_identity.dart' as danmaku_identity;
+import '../danmaku/models/danmaku_models.dart';
+import '../danmaku/presentation/danmaku_overlay.dart';
+import '../danmaku/service/danmaku_service.dart';
+import '../danmaku/settings/danmaku_display_settings.dart';
 import '../services/continue_watching.dart';
 import '../services/badge_prefs.dart';
 import '../services/audio_track_store.dart';
@@ -43,6 +49,7 @@ import '../utils/file_info_extractor.dart';
 import '../utils/tv_helper.dart';
 import '../widgets/format_chip.dart';
 import 'player_error.dart';
+import '../l10n/app_localizations.dart';
 
 /// Whether the app is running under `flutter test`.
 const bool _inTests = bool.fromEnvironment('FLUTTER_TEST');
@@ -102,6 +109,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   String? _mpvError;
   final List<StreamSubscription<Object?>> _mpvSubs = [];
   BoxFit _mpvFit = BoxFit.contain;
+
   /// Forced aspect ratio applied in mpv mode for the 16:9 / 4:3 aspect modes
   /// (a `Center`-box wraps the video; `cover` fills the inside of that box).
   double? _mpvAspect;
@@ -112,17 +120,21 @@ class _PlayerScreenState extends State<PlayerScreen>
   String? _mpvResolution;
   int? _mpvAudioChannels;
   bool _mpvSubtitleOn = false;
+
   /// Current subtitle lines from mpv, rendered by our own overlay instead of
   /// media_kit's built-in SubtitleView (which lands in the letterbox bar).
   List<String> _mpvSubtitleLines = [];
+
   /// Cached subtitle style (size/color/background/outline) shared with Media3.
   SubtitleStyle _subtitleStyle = const SubtitleStyle();
   double _mpvBrightness = 1.0;
   double _mpvZoomScale = 1.0;
+
   /// Last hwdec value applied to the mpv instance ('auto-safe', 'mediacodec',
   /// 'no'). Displayed in the ⓘ info sheet so the user can see whether mpv is
   /// using hardware or software decoding.
   String _mpvHwdecMode = 'auto-safe';
+
   /// Active SMB loopback-bridge token (see [SmbHttpProxy] / `startLoopback`);
   /// null when the fallback's current source isn't served through the bridge.
   String? _mpvProxyToken;
@@ -158,6 +170,27 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _playing = false;
   bool _buffering = false;
   bool _completed = false;
+
+  /// Danmaku is a playback-side companion: loading or rendering failures must
+  /// never affect either video backend. Both Media3 and MPV publish into this
+  /// one media-clock stream.
+  final GlobalKey<DanmakuOverlayState> _danmakuOverlayKey =
+      GlobalKey<DanmakuOverlayState>();
+  final StreamController<DanmakuClockSnapshot> _danmakuClockController =
+      StreamController<DanmakuClockSnapshot>.broadcast(sync: true);
+  DanmakuClockSnapshot _danmakuClock = const DanmakuClockSnapshot(
+    positionSeconds: 0,
+  );
+  danmaku_canvas.DanmakuController? _danmakuCanvasController;
+  List<DanmakuItemModel> _danmakuItems = const [];
+  DanmakuStatus _danmakuStatus = DanmakuStatus.idle;
+  bool _danmakuVisible = false;
+  bool _danmakuConfigured = false;
+  int _danmakuSeekRevision = 0;
+  int _danmakuLoadGeneration = 0;
+  DanmakuDisplaySettings _danmakuDisplay = const DanmakuDisplaySettings();
+  danmaku_canvas.DanmakuOption _danmakuOption =
+      const danmaku_canvas.DanmakuOption(area: 0.8, safeArea: true);
 
   /// Which on-screen badge categories the user wants to see during playback.
   /// Loaded once from [BadgePrefs] at init; the settings screen writes the
@@ -219,6 +252,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   HdrFormat _liveHdr = HdrFormat.sdr;
   String? _liveDecoderName;
   bool? _isHwDecoder;
+
   /// Source URI scheme, used to label the source in the ⓘ info sheet
   /// (Local / SMB / WebDAV / FTP / HTTP / etc.).
   String _liveSourceScheme = '';
@@ -384,6 +418,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       try {
         _fitMode = await FitModeStore.load();
         _playbackSpeed = await PlaybackSpeedStore.load();
+        _danmakuDisplay = await DanmakuDisplaySettingsStore.load();
+        _applyDanmakuDisplaySettings();
         _swipeEnabled = await areSwipeGesturesEnabled();
         _autoPlayNext = await isAutoPlayNextEnabled();
         _repeat = await PlaybackModesStore.loadRepeat();
@@ -448,6 +484,165 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
   }
 
+  Future<void> _loadDanmakuForVideo(
+    VideoItem video, {
+    bool forceRefresh = false,
+  }) async {
+    final generation = ++_danmakuLoadGeneration;
+    try {
+      final service = DanmakuService.instance;
+      await service.init();
+      if (!mounted || generation != _danmakuLoadGeneration) return;
+
+      final configured = service.primarySource != null;
+      final visible = service.enabled && configured;
+      _danmakuConfigured = configured;
+      _danmakuVisible = visible;
+      if (!visible) {
+        _danmakuItems = const [];
+        _danmakuStatus = DanmakuStatus.idle;
+        _syncDanmakuItems();
+        setState(() {});
+        return;
+      }
+
+      final identity = await danmaku_identity.identityForAsync(video);
+      if (!mounted || generation != _danmakuLoadGeneration) return;
+      _danmakuItems = const [];
+      _danmakuStatus = DanmakuStatus.loading;
+      _syncDanmakuItems();
+      setState(() {});
+
+      final outcome = await service.ensureForVideo(
+        identity,
+        metadata: video.metadataContext,
+        forceRefresh: forceRefresh,
+      );
+      if (!mounted || generation != _danmakuLoadGeneration) return;
+      _danmakuItems = _filterDanmakuItems(outcome.items);
+      _danmakuStatus = outcome.status;
+      _syncDanmakuItems();
+      setState(() {});
+    } catch (error) {
+      debugPrint('danmaku: load failed: $error');
+      if (!mounted || generation != _danmakuLoadGeneration) return;
+      _danmakuItems = const [];
+      _danmakuStatus = DanmakuStatus.failed;
+      _syncDanmakuItems();
+      setState(() {});
+    }
+  }
+
+  void _syncDanmakuItems() {
+    final state = _danmakuOverlayKey.currentState;
+    if (state != null) {
+      state.setItems(_danmakuItems);
+      state.seekTo(_danmakuClock.positionSeconds);
+      return;
+    }
+    if (!_danmakuVisible || !mounted) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_danmakuVisible) return;
+      final mountedState = _danmakuOverlayKey.currentState;
+      mountedState?.setItems(_danmakuItems);
+      mountedState?.seekTo(_danmakuClock.positionSeconds);
+    });
+  }
+
+  void _applyDanmakuDisplaySettings() {
+    final duration = (10 / _danmakuDisplay.scrollSpeed).round().clamp(5, 20);
+    _danmakuOption = _danmakuOption.copyWith(
+      fontSize: _danmakuDisplay.fontSize,
+      opacity: _danmakuDisplay.opacity,
+      area: _danmakuDisplay.displayArea,
+      duration: duration,
+      hideScroll: !_danmakuDisplay.showScroll,
+      hideTop: !_danmakuDisplay.showTop,
+      hideBottom: !_danmakuDisplay.showBottom,
+      safeArea: true,
+      playbackRate: _playbackSpeed,
+    );
+    _danmakuCanvasController?.updateOption(_danmakuOption);
+  }
+
+  List<DanmakuItemModel> _filterDanmakuItems(List<DanmakuItemModel> items) {
+    final blockedWords = _danmakuDisplay.blockedWords
+        .map((word) => word.trim().toLowerCase())
+        .where((word) => word.isNotEmpty)
+        .toList(growable: false);
+    if (blockedWords.isEmpty) return items;
+    return items
+        .where((item) {
+          final text = item.text.toLowerCase();
+          return !blockedWords.any(text.contains);
+        })
+        .toList(growable: false);
+  }
+
+  void _emitDanmakuClock({Duration? position}) {
+    final snapshot = DanmakuClockSnapshot(
+      positionSeconds: (position ?? _position).inMicroseconds / 1000000.0,
+      durationSeconds: _duration.inMicroseconds / 1000000.0,
+      rate: _playbackSpeed,
+      isPlaying: _playing,
+      buffering: _buffering,
+      seekRevision: _danmakuSeekRevision,
+    );
+    _danmakuClock = snapshot;
+    if (!_danmakuClockController.isClosed) {
+      _danmakuClockController.add(snapshot);
+    }
+  }
+
+  void _markDanmakuSeek(Duration target) {
+    _danmakuSeekRevision++;
+    final clamped = _clampDuration(target);
+    _emitDanmakuClock(position: clamped);
+    _danmakuOverlayKey.currentState?.seekTo(clamped.inMicroseconds / 1000000.0);
+  }
+
+  Future<void> _setDanmakuVisible(bool value) async {
+    final service = DanmakuService.instance;
+    try {
+      await service.init();
+      if (!mounted) return;
+      _danmakuConfigured = service.primarySource != null;
+      if (value && !_danmakuConfigured) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: AppText(
+              'Add and enable a danmaku source in Settings first.',
+            ),
+          ),
+        );
+        return;
+      }
+      setState(() => _danmakuVisible = value);
+      await service.setEnabled(value);
+      if (!mounted) return;
+      if (value) {
+        if (_danmakuItems.isNotEmpty && _danmakuStatus == DanmakuStatus.ready) {
+          _syncDanmakuItems();
+        } else {
+          await _loadDanmakuForVideo(_current);
+        }
+      } else {
+        _danmakuCanvasController = null;
+      }
+    } catch (error) {
+      debugPrint('danmaku: toggle failed: $error');
+    }
+  }
+
+  String get _danmakuStatusLabel => switch (_danmakuStatus) {
+    DanmakuStatus.loading => 'Loading comments...',
+    DanmakuStatus.ready => '${_danmakuItems.length} comments',
+    DanmakuStatus.empty => 'Matched, but no comments',
+    DanmakuStatus.noMatch => 'No matching episode',
+    DanmakuStatus.failed => 'Load failed',
+    DanmakuStatus.idle => _danmakuConfigured ? 'Off' : 'No source configured',
+  };
+
   Future<void> _openCurrent() async {
     final video = _current;
     // A new video means a previous software-decode fallback was for the last
@@ -476,7 +671,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     // Seed chapters from the VideoItem (e.g. Jellyfin `MediaSources[].Chapters`);
     // native MKV parsing (`e.chapters`) will override once available.
     _chapters = video.chapters
-        .map((c) => ExoChapter(title: c.title, startMs: c.startMs, endMs: c.endMs))
+        .map(
+          (c) => ExoChapter(title: c.title, startMs: c.startMs, endMs: c.endMs),
+        )
         .toList();
     if (_chapters.isNotEmpty && mounted) setState(() {});
     if (video.path == null && video.uri == null) {
@@ -485,18 +682,24 @@ class _PlayerScreenState extends State<PlayerScreen>
       }
       return;
     }
+    // Danmaku loads beside playback and never delays the media open below.
+    unawaited(_loadDanmakuForVideo(video));
     // "Watch from beginning" clears the saved position so the details screen
     // stops showing the resume button for this engine.
     if (widget.startFromBeginning) {
       await _clearResume();
-      final engine = (_engine == PlayEngine.mpv || _mpvActive) ? 'mpv' : 'media3';
+      final engine = (_engine == PlayEngine.mpv || _mpvActive)
+          ? 'mpv'
+          : 'media3';
       await AudioTrackStore.clear(_resumeKey, engine: engine);
     }
     Duration? resume;
     if (!_inTests && !widget.startFromBeginning) {
       // Read the resume position for the ACTIVE engine (not hardcoded to
       // 'media3' — MPV saves under 'mpv' and would be missed).
-      final engine = (_engine == PlayEngine.mpv || _mpvActive) ? 'mpv' : 'media3';
+      final engine = (_engine == PlayEngine.mpv || _mpvActive)
+          ? 'mpv'
+          : 'media3';
       resume = await ResumeStore.positionFor(_resumeKey, engine: engine);
       // Skip trivial positions and "basically finished" ones.
       if (resume != null && resume < const Duration(seconds: 10)) resume = null;
@@ -512,7 +715,9 @@ class _PlayerScreenState extends State<PlayerScreen>
         ? null
         : await AudioTrackStore.load(
             _resumeKey,
-            engine: (_engine == PlayEngine.mpv || _mpvActive) ? 'mpv' : 'media3',
+            engine: (_engine == PlayEngine.mpv || _mpvActive)
+                ? 'mpv'
+                : 'media3',
           );
     final externalSubs = await _resolveExternalSubtitles(video);
     final readingLang = await SubtitlePrefs.loadReadingLanguage();
@@ -576,7 +781,9 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// found; the player then falls back to the container's embedded track.
   /// Errors are swallowed (sidecar discovery is best-effort and must never
   /// block playback).
-  Future<List<VideoExternalSub>> _resolveExternalSubtitles(VideoItem video) async {
+  Future<List<VideoExternalSub>> _resolveExternalSubtitles(
+    VideoItem video,
+  ) async {
     final existing = video.externalSubtitles;
     List<VideoExternalSub> resolved;
     // Source already attached its own external subs (Jellyfin, folder
@@ -667,6 +874,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   Future<void> _startMpvPrimary() async {
     if (_inTests) return;
     try {
+      unawaited(_loadDanmakuForVideo(_current));
       final subs = await _resolveExternalSubtitles(_current);
       if (subs.isNotEmpty) _current = _current.withExternalSubtitles(subs);
       Duration? resume;
@@ -727,22 +935,28 @@ class _PlayerScreenState extends State<PlayerScreen>
       // media_kit attaches its Android texture output inside an async closure
       // in the VideoController constructor; a failure there would otherwise
       // throw into the void and leave a black screen with no error.
-      unawaited(controller.platform.future.then<void>(
-        (_) => debugPrint('mpv: video output attached'),
-        onError: (Object e, StackTrace st) {
-          debugPrint('mpv: video output attach failed: $e\n$st');
-          _markMpvFailed('The fallback video output couldn\'t start: $e');
-        },
-      ));
+      unawaited(
+        controller.platform.future.then<void>(
+          (_) => debugPrint('mpv: video output attached'),
+          onError: (Object e, StackTrace st) {
+            debugPrint('mpv: video output attach failed: $e\n$st');
+            _markMpvFailed('The fallback video output couldn\'t start: $e');
+          },
+        ),
+      );
       if (automatic && mounted) {
         // Brief, honest signal that playback continued in a different engine.
         final messenger = ScaffoldMessenger.of(context);
         messenger
           ..hideCurrentSnackBar()
-          ..showSnackBar(const SnackBar(
-            content: Text('This video isn\'t supported by the built-in player, so the fallback player is being used.'),
-            duration: Duration(seconds: 3),
-          ));
+          ..showSnackBar(
+            const SnackBar(
+              content: AppText(
+                'This video isn\'t supported by the built-in player, so the fallback player is being used.',
+              ),
+              duration: Duration(seconds: 3),
+            ),
+          );
       }
       await _mpvOpen(player, _current, _position.inMilliseconds);
     } catch (e) {
@@ -801,12 +1015,23 @@ class _PlayerScreenState extends State<PlayerScreen>
     // Force software decode for these so mpv uses its bundled FFmpeg decoder
     // instead of the device hardware, which may hang on the first frame
     // (audio + video stuck, position frozen at 0:00).
-    final ext = _current.path?.split('.').last.toLowerCase() ??
+    final ext =
+        _current.path?.split('.').last.toLowerCase() ??
         _current.uri?.split('.').last.toLowerCase() ??
         '';
     final swOnly = const {
-      'm2ts', 'ts', 'm2t', 'm2p', 'vob', 'mpg', 'mpeg',
-      'wmv', 'rmvb', 'flv', 'ogv', 'dat',
+      'm2ts',
+      'ts',
+      'm2t',
+      'm2p',
+      'vob',
+      'mpg',
+      'mpeg',
+      'wmv',
+      'rmvb',
+      'flv',
+      'ogv',
+      'dat',
     }.contains(ext);
     final value = switch (_decoderMode) {
       DecoderMode.hw => 'mediacodec',
@@ -816,7 +1041,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     try {
       await platform.setProperty('hwdec', value);
       _mpvHwdecMode = value;
-      debugPrint('mpv: hwdec = $value${swOnly ? ' (sw-only container: .$ext)' : ''}');
+      debugPrint(
+        'mpv: hwdec = $value${swOnly ? ' (sw-only container: .$ext)' : ''}',
+      );
     } catch (e) {
       debugPrint('mpv: hwdec=$value unavailable: $e');
     }
@@ -839,6 +1066,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _duration = Duration.zero;
     _buffered = Duration.zero;
     _buffering = true;
+    unawaited(_loadDanmakuForVideo(video));
     if (mounted) setState(() {});
     await _mpvOpen(p, video, startMs);
   }
@@ -871,8 +1099,10 @@ class _PlayerScreenState extends State<PlayerScreen>
       try {
         playable = await _smbLoopbackUrl(src);
       } catch (e) {
-        _markMpvFailed('Could not stream this SMB file through the fallback '
-            'player: ${e.toString().replaceFirst('PlatformException', '')}');
+        _markMpvFailed(
+          'Could not stream this SMB file through the fallback '
+          'player: ${e.toString().replaceFirst('PlatformException', '')}',
+        );
         return;
       }
       if (!mounted) return;
@@ -881,11 +1111,18 @@ class _PlayerScreenState extends State<PlayerScreen>
     // force the lavf demuxer. mpv's native TS demuxer can't handle Blu-ray
     // m2ts packets (192-byte with 4-byte timestamp prefix) — it gets stuck
     // scanning the same file offset repeatedly, never finding a sync point.
-    final ext = video.path?.split('.').last.toLowerCase() ??
+    final ext =
+        video.path?.split('.').last.toLowerCase() ??
         video.uri?.split('.').last.toLowerCase() ??
         '';
     final useLavfDemuxer = const {
-      'm2ts', 'ts', 'm2t', 'm2p', 'vob', 'mpg', 'mpeg',
+      'm2ts',
+      'ts',
+      'm2t',
+      'm2p',
+      'vob',
+      'mpg',
+      'mpeg',
     }.contains(ext);
     try {
       final platform = player.platform;
@@ -943,9 +1180,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       }
       // a) Wait for the texture ID.
       try {
-        await controller.platform.future.timeout(
-          const Duration(seconds: 5),
-        );
+        await controller.platform.future.timeout(const Duration(seconds: 5));
       } catch (e) {
         debugPrint('mpv: texture attach: $e (proceeding anyway)');
       }
@@ -1041,10 +1276,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (s.isDefault) continue;
       unawaited(_addMpvSubtitle(player, s, select: false));
     }
-    final def = subs.firstWhere(
-      (s) => s.isDefault,
-      orElse: () => subs.first,
-    );
+    final def = subs.firstWhere((s) => s.isDefault, orElse: () => subs.first);
     await _addMpvSubtitle(player, def, select: true);
   }
 
@@ -1119,105 +1351,137 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _listenMpv(Player player) {
-    _mpvSubs.add(player.stream.playing.listen((v) {
-      if (!mounted) return;
-      _buffering = false;
-      _playing = v;
-      _syncControlsForPlaybackState();
-      _syncMpvPipState();
-      setState(() {});
-    }));
-    _mpvSubs.add(player.stream.position.listen((v) {
-      if (!mounted) return;
-      _position = v;
-      // A-B repeat: loop back to A whenever playback passes B.
-      if (_abA != null &&
-          _abB != null &&
-          _playing &&
-          !_dragging &&
-          v >= Duration(milliseconds: _abB!)) {
-        final t = Duration(milliseconds: _abA!);
-        _position = t;
-        unawaited(player.seek(t));
-      }
-      _maybeSaveMpvResume(v);
-      setState(() {});
-    }));
-    _mpvSubs.add(player.stream.duration.listen((v) {
-      if (!mounted) return;
-      if (v > Duration.zero) _hadMedia = true;
-      _duration = v;
-      setState(() {});
-    }));
-    _mpvSubs.add(player.stream.tracks.listen((t) {
-      if (!mounted) return;
-      _mpvTracks = t;
-      _syncMpvTrackMeta();
-      // Restore the user's chosen audio track on first tracks event after open.
-      if (_pendingAudioTrackRestore is String && t.audio.isNotEmpty) {
-        final restoreId = _pendingAudioTrackRestore as String;
-        _pendingAudioTrackRestore = null;
-        for (final tr in t.audio) {
-          if (tr.id == restoreId) {
-            player.setAudioTrack(tr);
-            break;
+    _mpvSubs.add(
+      player.stream.playing.listen((v) {
+        if (!mounted) return;
+        _buffering = false;
+        _playing = v;
+        _syncControlsForPlaybackState();
+        _syncMpvPipState();
+        _emitDanmakuClock();
+        setState(() {});
+      }),
+    );
+    _mpvSubs.add(
+      player.stream.position.listen((v) {
+        if (!mounted) return;
+        _position = v;
+        // A-B repeat: loop back to A whenever playback passes B.
+        if (_abA != null &&
+            _abB != null &&
+            _playing &&
+            !_dragging &&
+            v >= Duration(milliseconds: _abB!)) {
+          final t = Duration(milliseconds: _abA!);
+          _position = t;
+          _markDanmakuSeek(t);
+          unawaited(player.seek(t));
+        }
+        _maybeSaveMpvResume(v);
+        _emitDanmakuClock();
+        setState(() {});
+      }),
+    );
+    _mpvSubs.add(
+      player.stream.duration.listen((v) {
+        if (!mounted) return;
+        if (v > Duration.zero) _hadMedia = true;
+        _duration = v;
+        _emitDanmakuClock();
+        setState(() {});
+      }),
+    );
+    _mpvSubs.add(
+      player.stream.tracks.listen((t) {
+        if (!mounted) return;
+        _mpvTracks = t;
+        _syncMpvTrackMeta();
+        // Restore the user's chosen audio track on first tracks event after open.
+        if (_pendingAudioTrackRestore is String && t.audio.isNotEmpty) {
+          final restoreId = _pendingAudioTrackRestore as String;
+          _pendingAudioTrackRestore = null;
+          for (final tr in t.audio) {
+            if (tr.id == restoreId) {
+              player.setAudioTrack(tr);
+              break;
+            }
           }
         }
-      }
-      setState(() {});
-    }));
-    _mpvSubs.add(player.stream.track.listen((t) {
-      if (!mounted) return;
-      // 'no' = subtitles explicitly off; 'auto' = mpv auto-selected a track
-      // (subtitles ARE displaying); any other id = user manually selected one.
-      _mpvSubtitleOn = t.subtitle.id != 'no';
-      setState(() {});
-    }));
-    _mpvSubs.add(player.stream.subtitle.listen((lines) {
-      if (!mounted) return;
-      _mpvSubtitleLines = lines.where((l) => l.trim().isNotEmpty).toList();
-      setState(() {});
-    }));
-    _mpvSubs.add(player.stream.width.listen((v) {
-      if (!mounted) return;
-      _syncMpvTracksResolution();
-      setState(() {});
-    }));
-    _mpvSubs.add(player.stream.height.listen((v) {
-      if (!mounted) return;
-      _syncMpvTracksResolution();
-      setState(() {});
-    }));
-    _mpvSubs.add(player.stream.buffer.listen((v) {
-      if (!mounted) return;
-      _buffered = v;
-    }));
-    _mpvSubs.add(player.stream.buffering.listen((v) {
-      if (!mounted) return;
-      _buffering = v;
-      _syncControlsForPlaybackState();
-      setState(() {});
-    }));
-    _mpvSubs.add(player.stream.completed.listen((v) {
-      if (!mounted) return;
-      if (v) {
-        _playing = false;
-        _buffering = false;
-        _buffered = Duration.zero;
-        _completed = true;
-        _onMpvEnded();
-      }
-      setState(() {});
-    }));
-    _mpvSubs.add(player.stream.error.listen((msg) {
-      debugPrint('mpv: playback error: $msg');
-      if (!mounted) return;
-      _markMpvFailed('Fallback player error: $msg');
-    }));
-    _mpvSubs.add(player.stream.log.listen((l) {
-      // mpv's own log lines — invaluable when a file won't open.
-      debugPrint('mpv [${l.level}] ${l.text.trim()}');
-    }));
+        setState(() {});
+      }),
+    );
+    _mpvSubs.add(
+      player.stream.track.listen((t) {
+        if (!mounted) return;
+        // 'no' = subtitles explicitly off; 'auto' = mpv auto-selected a track
+        // (subtitles ARE displaying); any other id = user manually selected one.
+        _mpvSubtitleOn = t.subtitle.id != 'no';
+        setState(() {});
+      }),
+    );
+    _mpvSubs.add(
+      player.stream.subtitle.listen((lines) {
+        if (!mounted) return;
+        _mpvSubtitleLines = lines.where((l) => l.trim().isNotEmpty).toList();
+        setState(() {});
+      }),
+    );
+    _mpvSubs.add(
+      player.stream.width.listen((v) {
+        if (!mounted) return;
+        _syncMpvTracksResolution();
+        setState(() {});
+      }),
+    );
+    _mpvSubs.add(
+      player.stream.height.listen((v) {
+        if (!mounted) return;
+        _syncMpvTracksResolution();
+        setState(() {});
+      }),
+    );
+    _mpvSubs.add(
+      player.stream.buffer.listen((v) {
+        if (!mounted) return;
+        _buffered = v;
+      }),
+    );
+    _mpvSubs.add(
+      player.stream.buffering.listen((v) {
+        if (!mounted) return;
+        _buffering = v;
+        _syncControlsForPlaybackState();
+        _emitDanmakuClock();
+        setState(() {});
+      }),
+    );
+    _mpvSubs.add(
+      player.stream.completed.listen((v) {
+        if (!mounted) return;
+        if (v) {
+          _playing = false;
+          _buffering = false;
+          _buffered = Duration.zero;
+          _completed = true;
+          _emitDanmakuClock();
+          _onMpvEnded();
+        }
+        setState(() {});
+      }),
+    );
+    _mpvSubs.add(
+      player.stream.error.listen((msg) {
+        debugPrint('mpv: playback error: $msg');
+        if (!mounted) return;
+        _markMpvFailed('Fallback player error: $msg');
+      }),
+    );
+    _mpvSubs.add(
+      player.stream.log.listen((l) {
+        // mpv's own log lines — invaluable when a file won't open.
+        debugPrint('mpv [${l.level}] ${l.text.trim()}');
+      }),
+    );
   }
 
   /// Best-available video codec name reported by the mpv engine (or null).
@@ -1248,8 +1512,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       final channels = tr.channelscount;
       if (channels != null && channels > 0) _mpvAudioChannels = channels;
       final parts = [
-        if (codec != null && codec.isNotEmpty)
-          formatAudioCodec(codec),
+        if (codec != null && codec.isNotEmpty) formatAudioCodec(codec),
         if (channels != null && channels > 0) channelsLabel(channels),
       ];
       if (parts.isNotEmpty) return parts.join(' · ');
@@ -1284,11 +1547,13 @@ class _PlayerScreenState extends State<PlayerScreen>
     final p = _mpvPlayer;
     final w = p?.state.width ?? 0;
     final h = p?.state.height ?? 0;
-    unawaited(MpvPipService.instance.setState(
-      active: _mpvActive,
-      playing: _playing,
-      aspect: (w > 0 && h > 0) ? w / h : 0,
-    ));
+    unawaited(
+      MpvPipService.instance.setState(
+        active: _mpvActive,
+        playing: _playing,
+        aspect: (w > 0 && h > 0) ? w / h : 0,
+      ),
+    );
   }
 
   /// System moved the app in/out of pip while the fallback engine is playing.
@@ -1334,7 +1599,9 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   void _onPipForward() {
     if (_mpvPlayer == null) return;
-    final cap = _duration > Duration.zero ? _duration - const Duration(seconds: 1) : null;
+    final cap = _duration > Duration.zero
+        ? _duration - const Duration(seconds: 1)
+        : null;
     var target = _position + const Duration(seconds: 10);
     if (cap != null && target > cap) target = cap;
     unawaited(_mpvSeek(target));
@@ -1438,10 +1705,12 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   /// Routes a user-initiated seek to whichever engine owns the video slot.
   void _seekBackend(Duration target) {
+    final clamped = _clampDuration(target);
+    _markDanmakuSeek(clamped);
     if (_mpvReady) {
-      unawaited(_mpvPlayer!.seek(_clampDuration(target)));
+      unawaited(_mpvPlayer!.seek(clamped));
     } else {
-      _exo?.seekTo(target);
+      _exo?.seekTo(clamped);
     }
   }
 
@@ -1453,7 +1722,9 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   /// Clips a target position to `[0, duration]` and seeks in mpv.
   Future<void> _mpvSeek(Duration target) async {
-    await _mpvPlayer?.seek(_clampDuration(target));
+    final clamped = _clampDuration(target);
+    _markDanmakuSeek(clamped);
+    await _mpvPlayer?.seek(clamped);
   }
 
   /// Restores the user's original decoder mode after a software fallback
@@ -1474,6 +1745,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// success so a later error starts fresh.
   Future<void> _reopenAt(Duration pos, Duration dur) async {
     final video = _current;
+    _markDanmakuSeek(pos);
     final externalSubs = await _resolveExternalSubtitles(video);
     try {
       await _exo?.open(
@@ -1598,6 +1870,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _buffered = e.buffered;
     _buffering = e.buffering;
     _completed = e.ended;
+    _emitDanmakuClock();
     // When the video finishes, clear any lingering error (e.g. the software
     // fallback banner or a transient IO message) so the replay icon shows
     // instead of the retry-button error surface.
@@ -1738,8 +2011,10 @@ class _PlayerScreenState extends State<PlayerScreen>
         e.playing &&
         !_dragging &&
         e.position >= Duration(milliseconds: _abB!)) {
-      _exo?.seekTo(Duration(milliseconds: _abA!));
-      _position = Duration(milliseconds: _abA!);
+      final target = Duration(milliseconds: _abA!);
+      _markDanmakuSeek(target);
+      _exo?.seekTo(target);
+      _position = target;
     }
 
     // End-of-media routing, in priority order:
@@ -1784,12 +2059,17 @@ class _PlayerScreenState extends State<PlayerScreen>
       _syncControlsForPlaybackState();
     }
     // Nova-style: reading language auto-select (pick track matching pref when nothing selected).
-    if (!_readingAutoSelected && e.subtitleTracks.isNotEmpty && e.selectedSubtitleTrack < 0) {
+    if (!_readingAutoSelected &&
+        e.subtitleTracks.isNotEmpty &&
+        e.selectedSubtitleTrack < 0) {
       _readingAutoSelected = true;
       Future.microtask(() => _maybeAutoSelectReading(e.subtitleTracks));
     }
     // Auto-fetch online subtitles once per video when no tracks exist (Nova-style).
-    if (!_autoFetchFired && e.state == _nativeStateReady && _subtitleTracks.isEmpty && e.subtitleTracks.isEmpty) {
+    if (!_autoFetchFired &&
+        e.state == _nativeStateReady &&
+        _subtitleTracks.isEmpty &&
+        e.subtitleTracks.isEmpty) {
       // Fire-and-forget; handle async outside setState.
       Future.microtask(() => _maybeAutoFetchSubs());
     }
@@ -1824,11 +2104,10 @@ class _PlayerScreenState extends State<PlayerScreen>
   /// path covers iOS (AetherEngine parks in `.ended`, and play-after-ended
   /// reloads the session) and acts as the fallback everywhere.
   void _restartForRepeatOne() {
+    _seekBackend(Duration.zero);
     if (_mpvReady) {
-      unawaited(_mpvSeek(Duration.zero));
       unawaited(_mpvPlayer?.play());
     } else {
-      _exo?.seekTo(Duration.zero);
       _exo?.play();
     }
   }
@@ -1866,7 +2145,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Sleep timer finished — playback paused'),
+          content: AppText('Sleep timer finished — playback paused'),
           duration: Duration(seconds: 3),
         ),
       );
@@ -1910,7 +2189,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     final siblings = await _orderedSiblings();
     if (siblings == null || siblings.length < 2) {
       // Single-file folder: repeat all means replay the same file.
-      return (wrap && siblings != null && siblings.length == 1) ? siblings.first : null;
+      return (wrap && siblings != null && siblings.length == 1)
+          ? siblings.first
+          : null;
     }
     final cur = _current;
     final idx = siblings.indexWhere(
@@ -1942,7 +2223,9 @@ class _PlayerScreenState extends State<PlayerScreen>
         final videos = entries.where((e) => !e.isDirectory).toList();
         if (videos.isEmpty) return null;
         // Prefer season/episode ordering when the folder looks episodic.
-        final episodic = videos.any((e) => ParsedFileName.parse(e.name).isEpisode);
+        final episodic = videos.any(
+          (e) => ParsedFileName.parse(e.name).isEpisode,
+        );
         if (episodic) {
           videos.sort((a, b) {
             final pa = ParsedFileName.parse(a.name);
@@ -1954,28 +2237,28 @@ class _PlayerScreenState extends State<PlayerScreen>
             return a.name.toLowerCase().compareTo(b.name.toLowerCase());
           });
         } else {
-          videos.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+          videos.sort(
+            (a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()),
+          );
         }
-        return videos
-            .map((e) {
-              final isContent = e.path.startsWith('content://');
-              final fi = extractFileInfo(e.name);
-              return VideoItem(
-                id: 'folder_next_${e.path.hashCode}',
-                title: e.name,
-                path: isContent ? null : e.path,
-                uri: isContent ? e.path : null,
-                resumeKey: e.resumeKey,
-                duration: Duration.zero,
-                sizeBytes: e.size,
-                videoCodec: fi.videoCodec,
-                audioCodec: fi.audioCodec,
-                audioChannels: fi.audioChannels,
-                resolution: fi.resolution,
-                hdrHint: fi.hdrHint,
-              );
-            })
-            .toList();
+        return videos.map((e) {
+          final isContent = e.path.startsWith('content://');
+          final fi = extractFileInfo(e.name);
+          return VideoItem(
+            id: 'folder_next_${e.path.hashCode}',
+            title: e.name,
+            path: isContent ? null : e.path,
+            uri: isContent ? e.path : null,
+            resumeKey: e.resumeKey,
+            duration: Duration.zero,
+            sizeBytes: e.size,
+            videoCodec: fi.videoCodec,
+            audioCodec: fi.audioCodec,
+            audioChannels: fi.audioChannels,
+            resolution: fi.resolution,
+            hdrHint: fi.hdrHint,
+          );
+        }).toList();
       } catch (_) {
         return null;
       }
@@ -1989,7 +2272,9 @@ class _PlayerScreenState extends State<PlayerScreen>
         if (resolved == null) {
           final servers = await client.loadServers();
           try {
-            resolved = servers.firstWhere((s) => s.urlHost == cur.jellyfinServerId);
+            resolved = servers.firstWhere(
+              (s) => s.urlHost == cur.jellyfinServerId,
+            );
           } catch (_) {
             resolved = null;
           }
@@ -2002,17 +2287,23 @@ class _PlayerScreenState extends State<PlayerScreen>
         final siblings = await client.getItems(resolved, parentId);
         final playable = siblings.where((e) => e.isPlayable).toList();
         if (playable.isEmpty) return null;
-        final episodic = playable.any((e) => e.parentIndexNumber != null && e.indexNumber != null);
+        final episodic = playable.any(
+          (e) => e.parentIndexNumber != null && e.indexNumber != null,
+        );
         if (episodic) {
           playable.sort((a, b) {
-            final c = (a.parentIndexNumber ?? 0).compareTo(b.parentIndexNumber ?? 0);
+            final c = (a.parentIndexNumber ?? 0).compareTo(
+              b.parentIndexNumber ?? 0,
+            );
             if (c != 0) return c;
             final d = (a.indexNumber ?? 0).compareTo(b.indexNumber ?? 0);
             if (d != 0) return d;
             return a.name.toLowerCase().compareTo(b.name.toLowerCase());
           });
         } else {
-          playable.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+          playable.sort(
+            (a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()),
+          );
         }
         return playable.map((e) => client.videoItem(resolved!, e)).toList();
       } catch (_) {
@@ -2179,6 +2470,9 @@ class _PlayerScreenState extends State<PlayerScreen>
       s.cancel();
     }
     unawaited(_mpvPlayer?.dispose());
+    _danmakuLoadGeneration++;
+    _danmakuCanvasController = null;
+    _danmakuClockController.close();
     unawaited(_stopMpvProxy());
     // Tell the native pip bridge the fallback engine is gone (clears its
     // auto-entry state) and drop the callbacks so a disposed screen is never
@@ -2571,7 +2865,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             children: [
               const Padding(
                 padding: EdgeInsets.fromLTRB(20, 16, 20, 4),
-                child: Text(
+                child: AppText(
                   'Audio tracks',
                   style: TextStyle(
                     color: Colors.white,
@@ -2592,12 +2886,12 @@ class _PlayerScreenState extends State<PlayerScreen>
                         isSelected ? Icons.check_circle : Icons.graphic_eq,
                         color: isSelected ? Colors.white : Colors.white54,
                       ),
-                      title: Text(
+                      title: AppText(
                         _audioTrackLabel(t),
                         style: const TextStyle(color: Colors.white),
                       ),
                       subtitle: t.bitrate > 0
-                          ? Text(
+                          ? AppText(
                               '${(t.bitrate / 1000).round()} kbps',
                               style: const TextStyle(color: Colors.white54),
                             )
@@ -2628,8 +2922,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     final all = _mpvTracks.audio;
     final tracks = all.where((t) => t.id != 'auto' && t.id != 'no').toList();
     if (tracks.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('No audio tracks found')));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: AppText('No audio tracks found')));
       return;
     }
     final selected = _mpvSelectedAudioId(tracks);
@@ -2647,7 +2942,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             children: [
               const Padding(
                 padding: EdgeInsets.fromLTRB(20, 16, 20, 4),
-                child: Text(
+                child: AppText(
                   'Audio tracks',
                   style: TextStyle(
                     color: Colors.white,
@@ -2668,12 +2963,12 @@ class _PlayerScreenState extends State<PlayerScreen>
                         isSelected ? Icons.check_circle : Icons.graphic_eq,
                         color: isSelected ? Colors.white : Colors.white54,
                       ),
-                      title: Text(
+                      title: AppText(
                         _mpvAudioTrackLabel(t),
                         style: const TextStyle(color: Colors.white),
                       ),
                       subtitle: (t.bitrate ?? 0) > 0
-                          ? Text(
+                          ? AppText(
                               '${(t.bitrate! / 1000).round()} kbps',
                               style: const TextStyle(color: Colors.white54),
                             )
@@ -2725,16 +3020,14 @@ class _PlayerScreenState extends State<PlayerScreen>
   Future<void> _openMpvSubtitleSheet() async {
     final player = _mpvPlayer;
     if (player == null) return;
-    final tracks = _mpvTracks.subtitle
-        .where((t) => t.id != 'no')
-        .toList();
+    final tracks = _mpvTracks.subtitle.where((t) => t.id != 'no').toList();
     // When mpv is in 'auto' mode, find the first REAL embedded track
     // (mpv auto-selects the first one); the 'auto' entry itself is not a
     // selectable subtitle track.
     final autoSelected = player.state.track.subtitle.id == 'auto'
         ? tracks
-            .where((t) => !t.uri && t.id != 'no' && t.id != 'auto')
-            .firstOrNull
+              .where((t) => !t.uri && t.id != 'no' && t.id != 'auto')
+              .firstOrNull
         : null;
     const onlineSentinel = -3;
     const loadSentinel = -2;
@@ -2757,7 +3050,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             children: [
               const Padding(
                 padding: EdgeInsets.fromLTRB(20, 16, 20, 4),
-                child: Text(
+                child: AppText(
                   'Subtitles',
                   style: TextStyle(
                     color: Colors.white,
@@ -2769,13 +3062,20 @@ class _PlayerScreenState extends State<PlayerScreen>
               if (downloaded.isNotEmpty) ...[
                 const Padding(
                   padding: EdgeInsets.fromLTRB(20, 8, 20, 4),
-                  child: Text('Downloaded',
-                      style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.w600)),
+                  child: AppText(
+                    'Downloaded',
+                    style: TextStyle(
+                      color: Colors.white70,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
                 ),
                 for (var i = 0; i < downloaded.length; i++)
                   () {
                     final d = downloaded[i];
-                    final isSelected = player.state.track.subtitle.uri &&
+                    final isSelected =
+                        player.state.track.subtitle.uri &&
                         player.state.track.subtitle.id == d.path;
                     final displayName = meaningfulSubtitleFileName(
                       apiFileName: d.fileName,
@@ -2783,9 +3083,18 @@ class _PlayerScreenState extends State<PlayerScreen>
                       videoTitle: _current.title,
                     );
                     return _tvListTile(
-                      leading: Icon(isSelected ? Icons.radio_button_checked : Icons.file_download_done, color: isSelected ? Colors.white : Colors.white70),
-                      title: Text('${subtitleFileNameLabel(displayName)} · ${d.language.toUpperCase()}', style: const TextStyle(color: Colors.white)),
-                      onTap: () => Navigator.of(sheetContext).pop(downloadedBase - i),
+                      leading: Icon(
+                        isSelected
+                            ? Icons.radio_button_checked
+                            : Icons.file_download_done,
+                        color: isSelected ? Colors.white : Colors.white70,
+                      ),
+                      title: AppText(
+                        '${subtitleFileNameLabel(displayName)} · ${d.language.toUpperCase()}',
+                        style: const TextStyle(color: Colors.white),
+                      ),
+                      onTap: () =>
+                          Navigator.of(sheetContext).pop(downloadedBase - i),
                     );
                   }(),
                 const Divider(color: Colors.white12, height: 1),
@@ -2799,42 +3108,52 @@ class _PlayerScreenState extends State<PlayerScreen>
                       ? Colors.white
                       : Colors.white54,
                 ),
-                title: const Text('Off',
-                    style: TextStyle(color: Colors.white)),
+                title: const AppText(
+                  'Off',
+                  style: TextStyle(color: Colors.white),
+                ),
                 onTap: () => Navigator.of(sheetContext).pop(-1),
               ),
               for (final t in tracks.where((t) => t.id != 'auto'))
                 () {
                   final currentId = player.state.track.subtitle.id;
-                  final isSelected = !t.uri &&
-                      (currentId == t.id || t == autoSelected);
+                  final isSelected =
+                      !t.uri && (currentId == t.id || t == autoSelected);
                   final title = t.title?.trim();
                   final lang = languageName(t.language ?? '');
                   return _tvListTile(
                     leading: Icon(
-                      isSelected ? Icons.radio_button_checked : Icons.radio_button_off,
+                      isSelected
+                          ? Icons.radio_button_checked
+                          : Icons.radio_button_off,
                       color: isSelected ? Colors.white : Colors.white54,
                     ),
-                    title: Text(
-                      [lang, if (title != null && title.isNotEmpty) title]
-                          .where((s) => s.isNotEmpty)
-                          .join(' · '),
+                    title: AppText(
+                      [
+                        lang,
+                        if (title != null && title.isNotEmpty) title,
+                      ].where((s) => s.isNotEmpty).join(' · '),
                       style: const TextStyle(color: Colors.white),
                     ),
-                    onTap: () => Navigator.of(sheetContext).pop(100 + tracks.indexOf(t)),
+                    onTap: () =>
+                        Navigator.of(sheetContext).pop(100 + tracks.indexOf(t)),
                   );
                 }(),
               const Divider(color: Colors.white12, height: 1),
               _tvListTile(
                 leading: const Icon(Icons.language, color: Colors.white70),
-                title: const Text('Search online subtitles…',
-                    style: TextStyle(color: Colors.white)),
+                title: const AppText(
+                  'Search online subtitles…',
+                  style: TextStyle(color: Colors.white),
+                ),
                 onTap: () => Navigator.of(sheetContext).pop(onlineSentinel),
               ),
               _tvListTile(
                 leading: const Icon(Icons.file_open, color: Colors.white70),
-                title: const Text('Load subtitle file…',
-                    style: TextStyle(color: Colors.white)),
+                title: const AppText(
+                  'Load subtitle file…',
+                  style: TextStyle(color: Colors.white),
+                ),
                 onTap: () => Navigator.of(sheetContext).pop(loadSentinel),
               ),
             ],
@@ -2888,7 +3207,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     final sourceUrl = (video.uri?.isNotEmpty == true)
         ? video.uri!
         : (video.path?.isNotEmpty == true ? video.path! : '');
-    final fileSize = (video.sizeBytes ?? 0) > 0 ? _formatBytes(video.sizeBytes!) : null;
+    final fileSize = (video.sizeBytes ?? 0) > 0
+        ? _formatBytes(video.sizeBytes!)
+        : null;
     final speedLabel = (_playbackSpeed - 1.0).abs() > 0.001
         ? '${_playbackSpeed.toStringAsFixed(2)}×'
         : null;
@@ -2906,12 +3227,18 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (_mpvReady)
         (
           label: 'Decoder',
-          value: 'libmpv · ${_mpvHwdecMode == "no" ? "software" : _mpvHwdecMode == "mediacodec" ? "hardware" : "hardware (auto)"}',
+          value:
+              'libmpv · ${_mpvHwdecMode == "no"
+                  ? "software"
+                  : _mpvHwdecMode == "mediacodec"
+                  ? "hardware"
+                  : "hardware (auto)"}',
         )
       else if (Platform.isAndroid && _liveDecoderName != null)
         (
           label: 'Decoder',
-          value: '$_liveDecoderName${(_isHwDecoder ?? true) ? " · hardware" : " · software"}',
+          value:
+              '$_liveDecoderName${(_isHwDecoder ?? true) ? " · hardware" : " · software"}',
         ),
       if (_audioInfoLabel != null || _liveAudioPassthrough)
         (
@@ -2924,7 +3251,8 @@ class _PlayerScreenState extends State<PlayerScreen>
           (_mpvReady && _mpvAudioChannels != null))
         (
           label: 'Audio ch.',
-          value: '${_mpvReady ? _mpvAudioChannels! : _liveAudioChannelCount!} ch',
+          value:
+              '${_mpvReady ? _mpvAudioChannels! : _liveAudioChannelCount!} ch',
         ),
       if (_transcodeActive ||
           video.isTranscoded ||
@@ -2955,7 +3283,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             children: [
               const Padding(
                 padding: EdgeInsets.fromLTRB(20, 16, 20, 4),
-                child: Text(
+                child: AppText(
                   'Video info',
                   style: TextStyle(
                     color: Colors.white,
@@ -2972,23 +3300,29 @@ class _PlayerScreenState extends State<PlayerScreen>
                     final r = rows[i];
                     return Padding(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 20, vertical: 6),
+                        horizontal: 20,
+                        vertical: 6,
+                      ),
                       child: Row(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           SizedBox(
                             width: 110,
-                            child: Text(
+                            child: AppText(
                               r.label,
                               style: const TextStyle(
-                                  color: Colors.white54, fontSize: 13),
+                                color: Colors.white54,
+                                fontSize: 13,
+                              ),
                             ),
                           ),
                           Expanded(
                             child: SelectableText(
                               r.value,
                               style: const TextStyle(
-                                  color: Colors.white, fontSize: 13),
+                                color: Colors.white,
+                                fontSize: 13,
+                              ),
                             ),
                           ),
                         ],
@@ -3082,7 +3416,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             children: [
               const Padding(
                 padding: EdgeInsets.fromLTRB(20, 16, 20, 4),
-                child: Text(
+                child: AppText(
                   'Subtitles',
                   style: TextStyle(
                     color: Colors.white,
@@ -3094,7 +3428,14 @@ class _PlayerScreenState extends State<PlayerScreen>
               if (downloaded.isNotEmpty) ...[
                 const Padding(
                   padding: EdgeInsets.fromLTRB(20, 8, 20, 4),
-                  child: Text('Downloaded', style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.w600)),
+                  child: AppText(
+                    'Downloaded',
+                    style: TextStyle(
+                      color: Colors.white70,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
                 ),
                 for (var i = 0; i < downloaded.length; i++)
                   () {
@@ -3109,9 +3450,18 @@ class _PlayerScreenState extends State<PlayerScreen>
                       videoTitle: _current.title,
                     );
                     return _tvListTile(
-                      leading: Icon(isSelected ? Icons.radio_button_checked : Icons.file_download_done, color: isSelected ? Colors.white : Colors.white70),
-                      title: Text('${subtitleFileNameLabel(displayName)} · ${d.language.toUpperCase()}', style: const TextStyle(color: Colors.white)),
-                      onTap: () => Navigator.of(sheetContext).pop(downloadedBase - i),
+                      leading: Icon(
+                        isSelected
+                            ? Icons.radio_button_checked
+                            : Icons.file_download_done,
+                        color: isSelected ? Colors.white : Colors.white70,
+                      ),
+                      title: AppText(
+                        '${subtitleFileNameLabel(displayName)} · ${d.language.toUpperCase()}',
+                        style: const TextStyle(color: Colors.white),
+                      ),
+                      onTap: () =>
+                          Navigator.of(sheetContext).pop(downloadedBase - i),
                     );
                   }(),
                 const Divider(color: Colors.white12, height: 1),
@@ -3119,7 +3469,7 @@ class _PlayerScreenState extends State<PlayerScreen>
               if (tracks.isEmpty && downloaded.isEmpty)
                 const Padding(
                   padding: EdgeInsets.fromLTRB(20, 8, 20, 8),
-                  child: Text(
+                  child: AppText(
                     'No subtitles found in this video',
                     style: TextStyle(color: Colors.white54, fontSize: 13),
                   ),
@@ -3132,7 +3482,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                         : Icons.radio_button_off,
                     color: selected < 0 ? Colors.white : Colors.white54,
                   ),
-                  title: const Text(
+                  title: const AppText(
                     'Off',
                     style: TextStyle(color: Colors.white),
                   ),
@@ -3148,7 +3498,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                             : Icons.radio_button_off,
                         color: isSelected ? Colors.white : Colors.white54,
                       ),
-                      title: Text(
+                      title: AppText(
                         _subtitleTrackLabel(t),
                         style: const TextStyle(color: Colors.white),
                       ),
@@ -3159,7 +3509,7 @@ class _PlayerScreenState extends State<PlayerScreen>
               const Divider(color: Colors.white12, height: 1),
               _tvListTile(
                 leading: const Icon(Icons.language, color: Colors.white70),
-                title: const Text(
+                title: const AppText(
                   'Search online subtitles…',
                   style: TextStyle(color: Colors.white),
                 ),
@@ -3167,7 +3517,7 @@ class _PlayerScreenState extends State<PlayerScreen>
               ),
               _tvListTile(
                 leading: const Icon(Icons.file_open, color: Colors.white70),
-                title: const Text(
+                title: const AppText(
                   'Load subtitle file…',
                   style: TextStyle(color: Colors.white),
                 ),
@@ -3252,9 +3602,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   Future<void> _attachSubtitlePath(String path) async {
     if (_mpvReady) {
       _mpvSubtitleOn = true;
-      await _mpvPlayer?.setSubtitleTrack(
-        SubtitleTrack.uri(path, language: ''),
-      );
+      await _mpvPlayer?.setSubtitleTrack(SubtitleTrack.uri(path, language: ''));
       return;
     }
     final pos = _position;
@@ -3292,7 +3640,11 @@ class _PlayerScreenState extends State<PlayerScreen>
       context: context,
       backgroundColor: const Color(0xFF1C1C1E),
       isScrollControlled: true,
-      builder: (ctx) => OpensubtitlesSheet(initialQuery: q, filePath: filePath, resumeKey: resumeKey),
+      builder: (ctx) => OpensubtitlesSheet(
+        initialQuery: q,
+        filePath: filePath,
+        resumeKey: resumeKey,
+      ),
     );
     if (result == null || result.isEmpty || !mounted) return;
     await _attachSubtitlePath(result);
@@ -3321,19 +3673,29 @@ class _PlayerScreenState extends State<PlayerScreen>
       final resumeKey = _current.resumeKey ?? _current.id;
       final downloaded = await DownloadedSubtitlesStore.loadForVideo(resumeKey);
       if (downloaded.isNotEmpty) return;
-      if (_current.subtitleUri != null && _current.subtitleUri!.isNotEmpty) return;
+      if (_current.subtitleUri != null && _current.subtitleUri!.isNotEmpty) {
+        return;
+      }
       final nova = await SubtitlePrefs.loadDownloadLanguage();
       final lang = openSubsCodeForNovaCode(nova);
-      final query = _current.title.trim().isEmpty ? _current.id : _current.title.trim();
+      final query = _current.title.trim().isEmpty
+          ? _current.id
+          : _current.title.trim();
       String? hash;
       if (_current.path != null && _current.path!.isNotEmpty) {
         hash = await opensubtitlesHashForFile(_current.path!);
       }
-      final results = await OpensubtitlesClient.instance.search(query: query, languages: lang, movieHash: hash);
+      final results = await OpensubtitlesClient.instance.search(
+        query: query,
+        languages: lang,
+        movieHash: hash,
+      );
       if (results.isEmpty) return;
       final best = results.first;
       if (!mounted || _subtitleTracks.isNotEmpty) return;
-      final info = await OpensubtitlesClient.instance.requestDownload(best.fileId);
+      final info = await OpensubtitlesClient.instance.requestDownload(
+        best.fileId,
+      );
       final bytes = await OpensubtitlesClient.instance.fetchBytes(info.link);
       final fileName = meaningfulSubtitleFileName(
         apiFileName: info.fileName,
@@ -3341,7 +3703,12 @@ class _PlayerScreenState extends State<PlayerScreen>
         videoTitle: _current.title,
       );
       final tmp = await _writeTempForAuto(fileName, bytes);
-      final entry = await DownloadedSubtitlesStore.saveForVideo(resumeKey: resumeKey, tempPath: tmp, fileName: fileName, language: best.language);
+      final entry = await DownloadedSubtitlesStore.saveForVideo(
+        resumeKey: resumeKey,
+        tempPath: tmp,
+        fileName: fileName,
+        language: best.language,
+      );
       if (!mounted) return;
       final pos = _position;
       _current = VideoItem(
@@ -3366,7 +3733,11 @@ class _PlayerScreenState extends State<PlayerScreen>
         externalSubtitles: _current.externalSubtitles,
       );
       await _reopenAt(pos, _duration);
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Auto-fetched: ${entry.fileName}')));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: AppText('Auto-fetched: ${entry.fileName}')),
+        );
+      }
     } catch (_) {}
   }
 
@@ -3375,7 +3746,8 @@ class _PlayerScreenState extends State<PlayerScreen>
       final pref = await SubtitlePrefs.loadReadingLanguage();
       if (pref == 'system') return;
       for (final t in tracks) {
-        if (trackMatchesNovaCode(t.language, pref) || trackMatchesNovaCode(t.label, pref)) {
+        if (trackMatchesNovaCode(t.language, pref) ||
+            trackMatchesNovaCode(t.label, pref)) {
           await _exo?.selectSubtitleTrack(t.index);
           break;
         }
@@ -3486,7 +3858,7 @@ class _PlayerScreenState extends State<PlayerScreen>
               children: [
                 const Padding(
                   padding: EdgeInsets.fromLTRB(20, 16, 20, 8),
-                  child: Text(
+                  child: AppText(
                     'Subtitles on NAS',
                     style: TextStyle(
                       color: Colors.white,
@@ -3506,7 +3878,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                           Icons.subtitles,
                           color: Colors.white54,
                         ),
-                        title: Text(
+                        title: AppText(
                           c.name,
                           style: const TextStyle(color: Colors.white),
                         ),
@@ -3518,7 +3890,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                 const Divider(color: Colors.white12, height: 1),
                 _tvListTile(
                   leading: const Icon(Icons.file_open, color: Colors.white70),
-                  title: const Text(
+                  title: const AppText(
                     'Browse device storage…',
                     style: TextStyle(color: Colors.white),
                   ),
@@ -3559,7 +3931,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             children: [
               const Padding(
                 padding: EdgeInsets.fromLTRB(20, 16, 20, 4),
-                child: Text(
+                child: AppText(
                   'Aspect ratio',
                   style: TextStyle(
                     color: Colors.white,
@@ -3582,7 +3954,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                             : Icons.radio_button_off,
                         color: isSelected ? Colors.white : Colors.white54,
                       ),
-                      title: Text(
+                      title: AppText(
                         mode.label,
                         style: const TextStyle(color: Colors.white),
                       ),
@@ -3637,7 +4009,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             children: [
               const Padding(
                 padding: EdgeInsets.fromLTRB(20, 16, 20, 4),
-                child: Text(
+                child: AppText(
                   'Playback speed',
                   style: TextStyle(
                     color: Colors.white,
@@ -3660,7 +4032,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                             : Icons.radio_button_off,
                         color: isSelected ? Colors.white : Colors.white54,
                       ),
-                      title: Text(
+                      title: AppText(
                         speedLabel(speed),
                         style: const TextStyle(color: Colors.white),
                       ),
@@ -3676,6 +4048,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
     if (choice != null && choice != _playbackSpeed) {
       setState(() => _playbackSpeed = choice);
+      _danmakuOption = _danmakuOption.copyWith(playbackRate: choice);
+      _danmakuCanvasController?.updateOption(_danmakuOption);
+      _emitDanmakuClock();
       _exo?.setSpeed(choice);
       if (!_inTests) PlaybackSpeedStore.save(choice);
     }
@@ -3700,7 +4075,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             children: [
               Padding(
                 padding: const EdgeInsets.fromLTRB(20, 16, 20, 4),
-                child: Text(
+                child: AppText(
                   'Chapters (${_chapters.length})',
                   style: const TextStyle(
                     color: Colors.white,
@@ -3719,35 +4094,40 @@ class _PlayerScreenState extends State<PlayerScreen>
                         ? _chapters[i + 1].startMs
                         : chapter.endMs;
                     final posMs = _position.inMilliseconds;
-                    final isCurrent = posMs >= chapter.startMs &&
+                    final isCurrent =
+                        posMs >= chapter.startMs &&
                         (next == null || posMs < next);
                     return _tvListTile(
                       leading: Icon(
                         isCurrent
                             ? Icons.play_arrow
                             : Icons.history_edu_outlined,
-                        color:
-                            isCurrent ? Theme.of(context).colorScheme.primary : Colors.white54,
+                        color: isCurrent
+                            ? Theme.of(context).colorScheme.primary
+                            : Colors.white54,
                       ),
-                      title: Text(
+                      title: AppText(
                         chapter.title,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                          color:
-                              isCurrent ? Colors.white : Colors.white70,
+                          color: isCurrent ? Colors.white : Colors.white70,
                           fontWeight: isCurrent
                               ? FontWeight.w600
                               : FontWeight.w400,
                         ),
                       ),
-                      subtitle: Text(
+                      subtitle: AppText(
                         _formatDuration(
                           Duration(milliseconds: chapter.startMs),
                         ),
-                        style: const TextStyle(color: Colors.white38, fontSize: 12),
+                        style: const TextStyle(
+                          color: Colors.white38,
+                          fontSize: 12,
+                        ),
                       ),
-                      onTap: () => Navigator.of(sheetContext).pop(chapter.startMs),
+                      onTap: () =>
+                          Navigator.of(sheetContext).pop(chapter.startMs),
                     );
                   },
                 ),
@@ -3758,7 +4138,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       ),
     );
     if (choice != null) {
-      _exo?.seekTo(Duration(milliseconds: choice));
+      _seekBackend(Duration(milliseconds: choice));
       if (!_playing && !_completed) _exo?.play();
     }
   }
@@ -3799,9 +4179,13 @@ class _PlayerScreenState extends State<PlayerScreen>
                 children: [
                   const Padding(
                     padding: EdgeInsets.fromLTRB(20, 16, 20, 8),
-                    child: Text(
+                    child: AppText(
                       'Playback settings',
-                      style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w600),
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                   ),
                   // Picture-in-picture lives in app Settings (Player section):
@@ -3811,10 +4195,14 @@ class _PlayerScreenState extends State<PlayerScreen>
                   // texture, so pip is easy to miss; give it an explicit row.
                   if (_mpvReady && Platform.isAndroid && !_isTv)
                     _tvListTile(
-                      leading: const Icon(Icons.picture_in_picture_alt,
-                          color: Colors.white70),
-                      title: const Text('Picture-in-picture',
-                          style: TextStyle(color: Colors.white)),
+                      leading: const Icon(
+                        Icons.picture_in_picture_alt,
+                        color: Colors.white70,
+                      ),
+                      title: const AppText(
+                        'Picture-in-picture',
+                        style: TextStyle(color: Colors.white),
+                      ),
                       onTap: () {
                         Navigator.of(sheetContext).pop();
                         unawaited(MpvPipService.instance.enterPip());
@@ -3822,10 +4210,25 @@ class _PlayerScreenState extends State<PlayerScreen>
                     ),
                   // Aspect ratio dropdown
                   _tvListTile(
-                    leading: const Icon(Icons.aspect_ratio, color: Colors.white70),
-                    title: const Text('Aspect ratio', style: TextStyle(color: Colors.white)),
-                    subtitle: Text(_fitMode.label, style: const TextStyle(color: Colors.white54, fontSize: 12)),
-                    trailing: Icon(expandAspect ? Icons.expand_less : Icons.expand_more, color: Colors.white54),
+                    leading: const Icon(
+                      Icons.aspect_ratio,
+                      color: Colors.white70,
+                    ),
+                    title: const AppText(
+                      'Aspect ratio',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    subtitle: AppText(
+                      _fitMode.label,
+                      style: const TextStyle(
+                        color: Colors.white54,
+                        fontSize: 12,
+                      ),
+                    ),
+                    trailing: Icon(
+                      expandAspect ? Icons.expand_less : Icons.expand_more,
+                      color: Colors.white54,
+                    ),
                     onTap: () => setSheet(() => expandAspect = !expandAspect),
                   ),
                   if (expandAspect)
@@ -3836,10 +4239,17 @@ class _PlayerScreenState extends State<PlayerScreen>
                           for (final mode in fitOrder)
                             _tvListTile(
                               leading: Icon(
-                                _fitMode == mode ? Icons.radio_button_checked : Icons.radio_button_off,
-                                color: _fitMode == mode ? Colors.white : Colors.white54,
+                                _fitMode == mode
+                                    ? Icons.radio_button_checked
+                                    : Icons.radio_button_off,
+                                color: _fitMode == mode
+                                    ? Colors.white
+                                    : Colors.white54,
                               ),
-                              title: Text(mode.label, style: const TextStyle(color: Colors.white)),
+                              title: AppText(
+                                mode.label,
+                                style: const TextStyle(color: Colors.white),
+                              ),
                               onTap: () {
                                 if (_fitMode != mode) {
                                   _applyFitMode(mode);
@@ -3854,9 +4264,21 @@ class _PlayerScreenState extends State<PlayerScreen>
                   // Playback speed dropdown
                   _tvListTile(
                     leading: const Icon(Icons.speed, color: Colors.white70),
-                    title: const Text('Playback speed', style: TextStyle(color: Colors.white)),
-                    subtitle: Text(speedLabel(_playbackSpeed), style: const TextStyle(color: Colors.white54, fontSize: 12)),
-                    trailing: Icon(expandSpeed ? Icons.expand_less : Icons.expand_more, color: Colors.white54),
+                    title: const AppText(
+                      'Playback speed',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    subtitle: AppText(
+                      speedLabel(_playbackSpeed),
+                      style: const TextStyle(
+                        color: Colors.white54,
+                        fontSize: 12,
+                      ),
+                    ),
+                    trailing: Icon(
+                      expandSpeed ? Icons.expand_less : Icons.expand_more,
+                      color: Colors.white54,
+                    ),
                     onTap: () => setSheet(() => expandSpeed = !expandSpeed),
                   ),
                   if (expandSpeed)
@@ -3867,13 +4289,27 @@ class _PlayerScreenState extends State<PlayerScreen>
                           for (final s in speeds)
                             _tvListTile(
                               leading: Icon(
-                                _playbackSpeed == s ? Icons.radio_button_checked : Icons.radio_button_off,
-                                color: _playbackSpeed == s ? Colors.white : Colors.white54,
+                                _playbackSpeed == s
+                                    ? Icons.radio_button_checked
+                                    : Icons.radio_button_off,
+                                color: _playbackSpeed == s
+                                    ? Colors.white
+                                    : Colors.white54,
                               ),
-                              title: Text(speedLabel(s), style: const TextStyle(color: Colors.white)),
+                              title: AppText(
+                                speedLabel(s),
+                                style: const TextStyle(color: Colors.white),
+                              ),
                               onTap: () {
                                 if (_playbackSpeed != s) {
                                   setState(() => _playbackSpeed = s);
+                                  _danmakuOption = _danmakuOption.copyWith(
+                                    playbackRate: s,
+                                  );
+                                  _danmakuCanvasController?.updateOption(
+                                    _danmakuOption,
+                                  );
+                                  _emitDanmakuClock();
                                   if (_mpvReady) {
                                     unawaited(_mpvPlayer?.setRate(s));
                                   } else {
@@ -3891,21 +4327,26 @@ class _PlayerScreenState extends State<PlayerScreen>
                   // Repeat & shuffle dropdown (Phase 2)
                   _tvListTile(
                     leading: Icon(
-                      _repeat == LoopMode.one
-                          ? Icons.repeat_one
-                          : Icons.repeat,
+                      _repeat == LoopMode.one ? Icons.repeat_one : Icons.repeat,
                       color: _repeat == LoopMode.off
                           ? Colors.white70
                           : const Color(0xFF7C8BFF),
                     ),
-                    title: const Text('Repeat & shuffle', style: TextStyle(color: Colors.white)),
-                    subtitle: Text(
-                      _shuffle
-                          ? '${_repeat.label} · Shuffle'
-                          : _repeat.label,
-                      style: const TextStyle(color: Colors.white54, fontSize: 12),
+                    title: const AppText(
+                      'Repeat & shuffle',
+                      style: TextStyle(color: Colors.white),
                     ),
-                    trailing: Icon(expandRepeat ? Icons.expand_less : Icons.expand_more, color: Colors.white54),
+                    subtitle: AppText(
+                      _shuffle ? '${_repeat.label} · Shuffle' : _repeat.label,
+                      style: const TextStyle(
+                        color: Colors.white54,
+                        fontSize: 12,
+                      ),
+                    ),
+                    trailing: Icon(
+                      expandRepeat ? Icons.expand_less : Icons.expand_more,
+                      color: Colors.white54,
+                    ),
                     onTap: () => setSheet(() => expandRepeat = !expandRepeat),
                   ),
                   if (expandRepeat)
@@ -3916,17 +4357,26 @@ class _PlayerScreenState extends State<PlayerScreen>
                           for (final mode in LoopMode.values)
                             _tvListTile(
                               leading: Icon(
-                                _repeat == mode ? Icons.radio_button_checked : Icons.radio_button_off,
-                                color: _repeat == mode ? Colors.white : Colors.white54,
+                                _repeat == mode
+                                    ? Icons.radio_button_checked
+                                    : Icons.radio_button_off,
+                                color: _repeat == mode
+                                    ? Colors.white
+                                    : Colors.white54,
                               ),
-                              title: Text(mode.label, style: const TextStyle(color: Colors.white)),
+                              title: AppText(
+                                mode.label,
+                                style: const TextStyle(color: Colors.white),
+                              ),
                               onTap: () {
                                 if (_repeat != mode) {
                                   setState(() => _repeat = mode);
                                   if (!_mpvReady) {
                                     _exo?.setRepeatMode(mode.index);
                                   }
-                                  if (!_inTests) PlaybackModesStore.saveRepeat(mode);
+                                  if (!_inTests) {
+                                    PlaybackModesStore.saveRepeat(mode);
+                                  }
                                 }
                                 setSheet(() {});
                               },
@@ -3938,8 +4388,17 @@ class _PlayerScreenState extends State<PlayerScreen>
                               if (!_inTests) PlaybackModesStore.saveShuffle(v);
                               setSheet(() {});
                             },
-                            title: const Text('Shuffle', style: TextStyle(color: Colors.white)),
-                            subtitle: const Text('Random order inside the folder', style: TextStyle(color: Colors.white54, fontSize: 12)),
+                            title: const AppText(
+                              'Shuffle',
+                              style: TextStyle(color: Colors.white),
+                            ),
+                            subtitle: const AppText(
+                              'Random order inside the folder',
+                              style: TextStyle(
+                                color: Colors.white54,
+                                fontSize: 12,
+                              ),
+                            ),
                           ),
                         ],
                       ),
@@ -3948,16 +4407,25 @@ class _PlayerScreenState extends State<PlayerScreen>
                   // Sleep timer dropdown (Phase 2)
                   _tvListTile(
                     leading: const Icon(Icons.bedtime, color: Colors.white70),
-                    title: const Text('Sleep timer', style: TextStyle(color: Colors.white)),
-                    subtitle: Text(
+                    title: const AppText(
+                      'Sleep timer',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    subtitle: AppText(
                       _sleepCountdown != null
                           ? '${_sleepCountdown!} left'
                           : _sleepAtEnd
-                              ? 'End of video'
-                              : 'Off',
-                      style: const TextStyle(color: Colors.white54, fontSize: 12),
+                          ? 'End of video'
+                          : 'Off',
+                      style: const TextStyle(
+                        color: Colors.white54,
+                        fontSize: 12,
+                      ),
                     ),
-                    trailing: Icon(expandSleep ? Icons.expand_less : Icons.expand_more, color: Colors.white54),
+                    trailing: Icon(
+                      expandSleep ? Icons.expand_less : Icons.expand_more,
+                      color: Colors.white54,
+                    ),
                     onTap: () => setSheet(() => expandSleep = !expandSleep),
                   ),
                   if (expandSleep)
@@ -3975,27 +4443,46 @@ class _PlayerScreenState extends State<PlayerScreen>
                           ])
                             _tvListTile(
                               leading: Icon(
-                                (_sleepUntil != null ? option.$1 : Duration.zero) == option.$1
+                                (_sleepUntil != null
+                                            ? option.$1
+                                            : Duration.zero) ==
+                                        option.$1
                                     ? Icons.radio_button_checked
                                     : Icons.radio_button_off,
-                                color: (_sleepUntil != null ? option.$1 : Duration.zero) == option.$1
+                                color:
+                                    (_sleepUntil != null
+                                            ? option.$1
+                                            : Duration.zero) ==
+                                        option.$1
                                     ? Colors.white
                                     : Colors.white54,
                               ),
-                              title: Text(option.$2, style: const TextStyle(color: Colors.white)),
+                              title: AppText(
+                                option.$2,
+                                style: const TextStyle(color: Colors.white),
+                              ),
                               onTap: () {
                                 _setSleepTimer(
-                                  duration: option.$1 == Duration.zero ? null : option.$1,
+                                  duration: option.$1 == Duration.zero
+                                      ? null
+                                      : option.$1,
                                 );
                                 setSheet(() {});
                               },
                             ),
                           _tvListTile(
                             leading: Icon(
-                              _sleepAtEnd ? Icons.radio_button_checked : Icons.radio_button_off,
-                              color: _sleepAtEnd ? Colors.white : Colors.white54,
+                              _sleepAtEnd
+                                  ? Icons.radio_button_checked
+                                  : Icons.radio_button_off,
+                              color: _sleepAtEnd
+                                  ? Colors.white
+                                  : Colors.white54,
                             ),
-                            title: const Text('End of current video', style: TextStyle(color: Colors.white)),
+                            title: const AppText(
+                              'End of current video',
+                              style: TextStyle(color: Colors.white),
+                            ),
                             onTap: () {
                               _setSleepTimer(endOfVideo: true);
                               setSheet(() {});
@@ -4011,18 +4498,33 @@ class _PlayerScreenState extends State<PlayerScreen>
                   if (defaultTargetPlatform == TargetPlatform.android &&
                       !_mpvReady) ...[
                     _tvListTile(
-                      leading: const Icon(Icons.graphic_eq, color: Colors.white70),
-                      title: const Text('Audio delay', style: TextStyle(color: Colors.white)),
-                      subtitle: Text(
+                      leading: const Icon(
+                        Icons.graphic_eq,
+                        color: Colors.white70,
+                      ),
+                      title: const AppText(
+                        'Audio delay',
+                        style: TextStyle(color: Colors.white),
+                      ),
+                      subtitle: AppText(
                         _audioDelayMs == 0
                             ? 'Off'
                             : _audioDelayMs > 0
-                                ? '+${(_audioDelayMs / 1000).toStringAsFixed(1)} s (audio later)'
-                                : '${(_audioDelayMs / 1000).toStringAsFixed(1)} s (audio earlier)',
-                        style: const TextStyle(color: Colors.white54, fontSize: 12),
+                            ? '+${(_audioDelayMs / 1000).toStringAsFixed(1)} s (audio later)'
+                            : '${(_audioDelayMs / 1000).toStringAsFixed(1)} s (audio earlier)',
+                        style: const TextStyle(
+                          color: Colors.white54,
+                          fontSize: 12,
+                        ),
                       ),
-                      trailing: Icon(expandAudioDelay ? Icons.expand_less : Icons.expand_more, color: Colors.white54),
-                      onTap: () => setSheet(() => expandAudioDelay = !expandAudioDelay),
+                      trailing: Icon(
+                        expandAudioDelay
+                            ? Icons.expand_less
+                            : Icons.expand_more,
+                        color: Colors.white54,
+                      ),
+                      onTap: () =>
+                          setSheet(() => expandAudioDelay = !expandAudioDelay),
                     ),
                     if (expandAudioDelay)
                       Padding(
@@ -4034,7 +4536,8 @@ class _PlayerScreenState extends State<PlayerScreen>
                               min: -5000,
                               max: 5000,
                               divisions: 100,
-                              label: '${(_audioDelayMs / 1000).toStringAsFixed(1)} s',
+                              label:
+                                  '${(_audioDelayMs / 1000).toStringAsFixed(1)} s',
                               onChanged: (v) {
                                 final ms = v.round();
                                 setState(() => _audioDelayMs = ms);
@@ -4049,7 +4552,10 @@ class _PlayerScreenState extends State<PlayerScreen>
                                   _exo?.setAudioDelay(0);
                                   setSheet(() {});
                                 },
-                                child: const Text('Reset', style: TextStyle(color: Colors.white70)),
+                                child: const AppText(
+                                  'Reset',
+                                  style: TextStyle(color: Colors.white70),
+                                ),
                               ),
                             ),
                           ],
@@ -4065,16 +4571,25 @@ class _PlayerScreenState extends State<PlayerScreen>
                           ? const Color(0xFF7C8BFF)
                           : Colors.white70,
                     ),
-                    title: const Text('A-B repeat', style: TextStyle(color: Colors.white)),
-                    subtitle: Text(
+                    title: const AppText(
+                      'A-B repeat',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    subtitle: AppText(
                       _abA != null && _abB != null
                           ? '${_formatDuration(Duration(milliseconds: _abA!))} – ${_formatDuration(Duration(milliseconds: _abB!))}'
                           : _abA != null
-                              ? 'A ${_formatDuration(Duration(milliseconds: _abA!))} — pick B'
-                              : 'Off',
-                      style: const TextStyle(color: Colors.white54, fontSize: 12),
+                          ? 'A ${_formatDuration(Duration(milliseconds: _abA!))} — pick B'
+                          : 'Off',
+                      style: const TextStyle(
+                        color: Colors.white54,
+                        fontSize: 12,
+                      ),
                     ),
-                    trailing: Icon(expandAB ? Icons.expand_less : Icons.expand_more, color: Colors.white54),
+                    trailing: Icon(
+                      expandAB ? Icons.expand_less : Icons.expand_more,
+                      color: Colors.white54,
+                    ),
                     onTap: () => setSheet(() => expandAB = !expandAB),
                   ),
                   if (expandAB)
@@ -4083,24 +4598,42 @@ class _PlayerScreenState extends State<PlayerScreen>
                       child: Column(
                         children: [
                           _tvListTile(
-                            leading: const Icon(Icons.flag, color: Colors.white54),
-                            title: const Text('Set A to current position', style: TextStyle(color: Colors.white)),
+                            leading: const Icon(
+                              Icons.flag,
+                              color: Colors.white54,
+                            ),
+                            title: const AppText(
+                              'Set A to current position',
+                              style: TextStyle(color: Colors.white),
+                            ),
                             onTap: () {
                               setState(() => _abA = _position.inMilliseconds);
                               setSheet(() {});
                             },
                           ),
                           _tvListTile(
-                            leading: const Icon(Icons.flag, color: Colors.white54),
-                            title: const Text('Set B to current position', style: TextStyle(color: Colors.white)),
+                            leading: const Icon(
+                              Icons.flag,
+                              color: Colors.white54,
+                            ),
+                            title: const AppText(
+                              'Set B to current position',
+                              style: TextStyle(color: Colors.white),
+                            ),
                             onTap: () {
                               setState(() => _abB = _position.inMilliseconds);
                               setSheet(() {});
                             },
                           ),
                           _tvListTile(
-                            leading: const Icon(Icons.clear, color: Colors.white54),
-                            title: const Text('Clear', style: TextStyle(color: Colors.white)),
+                            leading: const Icon(
+                              Icons.clear,
+                              color: Colors.white54,
+                            ),
+                            title: const AppText(
+                              'Clear',
+                              style: TextStyle(color: Colors.white),
+                            ),
                             onTap: () {
                               setState(() {
                                 _abA = null;
@@ -4113,38 +4646,101 @@ class _PlayerScreenState extends State<PlayerScreen>
                       ),
                     ),
                   const Divider(color: Colors.white12, height: 1),
+                  _tvListTile(
+                    leading: Icon(
+                      _danmakuVisible
+                          ? Icons.chat_bubble
+                          : Icons.chat_bubble_outline,
+                      color: _danmakuVisible
+                          ? const Color(0xFF4FC3F7)
+                          : Colors.white70,
+                    ),
+                    title: const AppText(
+                      'Danmaku',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    subtitle: AppText(
+                      _danmakuStatusLabel,
+                      style: const TextStyle(
+                        color: Colors.white54,
+                        fontSize: 12,
+                      ),
+                    ),
+                    trailing: Switch(
+                      value: _danmakuVisible,
+                      onChanged: (value) async {
+                        await _setDanmakuVisible(value);
+                        if (sheetContext.mounted) setSheet(() {});
+                      },
+                    ),
+                    onTap: () async {
+                      await _setDanmakuVisible(!_danmakuVisible);
+                      if (sheetContext.mounted) setSheet(() {});
+                    },
+                  ),
+                  if (_danmakuVisible &&
+                      (_danmakuStatus == DanmakuStatus.failed ||
+                          _danmakuStatus == DanmakuStatus.noMatch ||
+                          _danmakuStatus == DanmakuStatus.empty))
+                    _tvListTile(
+                      leading: const Icon(Icons.refresh, color: Colors.white54),
+                      title: const AppText(
+                        'Reload danmaku',
+                        style: TextStyle(color: Colors.white),
+                      ),
+                      onTap: () async {
+                        await _loadDanmakuForVideo(
+                          _current,
+                          forceRefresh: true,
+                        );
+                        if (sheetContext.mounted) setSheet(() {});
+                      },
+                    ),
+                  const Divider(color: Colors.white12, height: 1),
                   // Subtitle appearance (moved here from the app Settings
                   // screen — it belongs next to the CC picker it configures).
                   _tvListTile(
-                    leading: const Icon(Icons.closed_caption, color: Colors.white70),
-                    title: const Text('Subtitle settings', style: TextStyle(color: Colors.white)),
-                    subtitle: const Text('Size, color, background, delay', style: TextStyle(color: Colors.white54, fontSize: 12)),
-                    trailing: const Icon(Icons.chevron_right, color: Colors.white54),
-                  onTap: () async {
-                    Navigator.of(sheetContext).pop();
-                    await Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (_) => const SubtitleSettingsScreen(),
-                      ),
-                    );
-                    // Re-apply the (possibly changed) style to the live
-                    // player — the settings screen only persists; without
-                    // this the change only landed on the NEXT open.
-                    if (!mounted) return;
-                    try {
-                      final style = await SubtitleStyle.load();
-                      await _exo?.setSubtitleStyle(style);
-                      _subtitleStyle = style;
-                      final delayChanged = style.delayMs != _subtitleDelayMs;
-                      _subtitleDelayMs = style.delayMs;
-                      if (delayChanged &&
-                          Platform.isAndroid &&
-                          !_mpvReady &&
-                          (_subtitleTracks.isNotEmpty || _subtitleOn)) {
-                        await _reopenAt(_position, _duration);
-                      }
-                    } catch (_) {}
-                  },
+                    leading: const Icon(
+                      Icons.closed_caption,
+                      color: Colors.white70,
+                    ),
+                    title: const AppText(
+                      'Subtitle settings',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    subtitle: const AppText(
+                      'Size, color, background, delay',
+                      style: TextStyle(color: Colors.white54, fontSize: 12),
+                    ),
+                    trailing: const Icon(
+                      Icons.chevron_right,
+                      color: Colors.white54,
+                    ),
+                    onTap: () async {
+                      Navigator.of(sheetContext).pop();
+                      await Navigator.of(context).push(
+                        MaterialPageRoute<void>(
+                          builder: (_) => const SubtitleSettingsScreen(),
+                        ),
+                      );
+                      // Re-apply the (possibly changed) style to the live
+                      // player — the settings screen only persists; without
+                      // this the change only landed on the NEXT open.
+                      if (!mounted) return;
+                      try {
+                        final style = await SubtitleStyle.load();
+                        await _exo?.setSubtitleStyle(style);
+                        _subtitleStyle = style;
+                        final delayChanged = style.delayMs != _subtitleDelayMs;
+                        _subtitleDelayMs = style.delayMs;
+                        if (delayChanged &&
+                            Platform.isAndroid &&
+                            !_mpvReady &&
+                            (_subtitleTracks.isNotEmpty || _subtitleOn)) {
+                          await _reopenAt(_position, _duration);
+                        }
+                      } catch (_) {}
+                    },
                   ),
                   const Divider(color: Colors.white12, height: 1),
                   // Video decoder mode (Auto/Hardware/Software). Applies to
@@ -4153,10 +4749,23 @@ class _PlayerScreenState extends State<PlayerScreen>
                   if (defaultTargetPlatform == TargetPlatform.android) ...[
                     _tvListTile(
                       leading: const Icon(Icons.memory, color: Colors.white70),
-                      title: const Text('Video decoder', style: TextStyle(color: Colors.white)),
-                      subtitle: Text(_decoderMode.label, style: const TextStyle(color: Colors.white54, fontSize: 12)),
-                      trailing: Icon(expandDecoder ? Icons.expand_less : Icons.expand_more, color: Colors.white54),
-                      onTap: () => setSheet(() => expandDecoder = !expandDecoder),
+                      title: const AppText(
+                        'Video decoder',
+                        style: TextStyle(color: Colors.white),
+                      ),
+                      subtitle: AppText(
+                        _decoderMode.label,
+                        style: const TextStyle(
+                          color: Colors.white54,
+                          fontSize: 12,
+                        ),
+                      ),
+                      trailing: Icon(
+                        expandDecoder ? Icons.expand_less : Icons.expand_more,
+                        color: Colors.white54,
+                      ),
+                      onTap: () =>
+                          setSheet(() => expandDecoder = !expandDecoder),
                     ),
                     if (expandDecoder)
                       Padding(
@@ -4166,17 +4775,28 @@ class _PlayerScreenState extends State<PlayerScreen>
                             for (final m in DecoderMode.values)
                               _tvListTile(
                                 leading: Icon(
-                                  _decoderMode == m ? Icons.radio_button_checked : Icons.radio_button_off,
-                                  color: _decoderMode == m ? Colors.white : Colors.white54,
+                                  _decoderMode == m
+                                      ? Icons.radio_button_checked
+                                      : Icons.radio_button_off,
+                                  color: _decoderMode == m
+                                      ? Colors.white
+                                      : Colors.white54,
                                 ),
-                                title: Text(m.label, style: const TextStyle(color: Colors.white)),
-                                subtitle: Text(
+                                title: AppText(
+                                  m.label,
+                                  style: const TextStyle(color: Colors.white),
+                                ),
+                                subtitle: AppText(
                                   switch (m) {
                                     DecoderMode.hw => 'Force hardware decoders',
-                                    DecoderMode.sw => 'Prefer software decoders',
+                                    DecoderMode.sw =>
+                                      'Prefer software decoders',
                                     _ => 'Automatic (recommended)',
                                   },
-                                  style: const TextStyle(color: Colors.white38, fontSize: 11),
+                                  style: const TextStyle(
+                                    color: Colors.white38,
+                                    fontSize: 11,
+                                  ),
                                 ),
                                 onTap: () async {
                                   if (m != _decoderMode) {
@@ -4188,7 +4808,9 @@ class _PlayerScreenState extends State<PlayerScreen>
                                       // engine; no reopen needed.
                                       if (mounted) {
                                         await _applyMpvHwdec(_mpvPlayer!);
-                                        if (sheetContext.mounted) Navigator.of(sheetContext).pop();
+                                        if (sheetContext.mounted) {
+                                          Navigator.of(sheetContext).pop();
+                                        }
                                       }
                                       return;
                                     }
@@ -4196,17 +4818,27 @@ class _PlayerScreenState extends State<PlayerScreen>
                                     // fresh MediaCodecSelector query picks the
                                     // new decoder (HW vs SW) immediately.
                                     if (!sheetContext.mounted) {
-                                      if (mounted) await _reopenAt(_position, _duration);
+                                      if (mounted) {
+                                        await _reopenAt(_position, _duration);
+                                      }
                                       return;
                                     }
                                     Navigator.of(sheetContext).pop();
-                                    if (mounted) await _reopenAt(_position, _duration);
+                                    if (mounted) {
+                                      await _reopenAt(_position, _duration);
+                                    }
                                   }
                                 },
                               ),
                             const Padding(
                               padding: EdgeInsets.fromLTRB(16, 4, 16, 8),
-                              child: Text('Reopens at same position to switch decoder.', style: TextStyle(color: Colors.white38, fontSize: 11)),
+                              child: AppText(
+                                'Reopens at same position to switch decoder.',
+                                style: TextStyle(
+                                  color: Colors.white38,
+                                  fontSize: 11,
+                                ),
+                              ),
                             ),
                           ],
                         ),
@@ -4218,10 +4850,27 @@ class _PlayerScreenState extends State<PlayerScreen>
                   // no DRC, so the toggles would be cosmetic no-ops on iOS.
                   if (defaultTargetPlatform == TargetPlatform.android) ...[
                     _tvListTile(
-                      leading: const Icon(Icons.volume_up, color: Colors.white70),
-                      title: const Text('Volume Boost', style: TextStyle(color: Colors.white)),
-                      subtitle: Text(_audioBoost > 1.01 ? '${_audioBoost.toStringAsFixed(1)}×' : 'Off', style: const TextStyle(color: Colors.white54, fontSize: 12)),
-                      trailing: Icon(expandBoost ? Icons.expand_less : Icons.expand_more, color: Colors.white54),
+                      leading: const Icon(
+                        Icons.volume_up,
+                        color: Colors.white70,
+                      ),
+                      title: const AppText(
+                        'Volume Boost',
+                        style: TextStyle(color: Colors.white),
+                      ),
+                      subtitle: AppText(
+                        _audioBoost > 1.01
+                            ? '${_audioBoost.toStringAsFixed(1)}×'
+                            : 'Off',
+                        style: const TextStyle(
+                          color: Colors.white54,
+                          fontSize: 12,
+                        ),
+                      ),
+                      trailing: Icon(
+                        expandBoost ? Icons.expand_less : Icons.expand_more,
+                        color: Colors.white54,
+                      ),
                       onTap: () => setSheet(() => expandBoost = !expandBoost),
                     ),
                     if (expandBoost)
@@ -4254,21 +4903,36 @@ class _PlayerScreenState extends State<PlayerScreen>
                             Row(
                               mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
-                                TextButton(onPressed: () async {
-                                  setState(() => _audioBoost = 1.0);
-                                  setSheet(() {});
-                                  if (_mpvReady) {
-                                    await _applyMpvVolume();
-                                  } else {
-                                    _exo?.setAudioBoost(1.0);
-                                  }
-                                  await PlaybackBoostStore.save(1.0);
-                                }, child: const Text('Reset')),
-                                Text('${_audioBoost.toStringAsFixed(1)}×', style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                                TextButton(
+                                  onPressed: () async {
+                                    setState(() => _audioBoost = 1.0);
+                                    setSheet(() {});
+                                    if (_mpvReady) {
+                                      await _applyMpvVolume();
+                                    } else {
+                                      _exo?.setAudioBoost(1.0);
+                                    }
+                                    await PlaybackBoostStore.save(1.0);
+                                  },
+                                  child: const AppText('Reset'),
+                                ),
+                                AppText(
+                                  '${_audioBoost.toStringAsFixed(1)}×',
+                                  style: const TextStyle(
+                                    color: Colors.white70,
+                                    fontSize: 12,
+                                  ),
+                                ),
                                 const SizedBox(width: 48),
                               ],
                             ),
-                            const Text('LoudnessEnhancer (0–1500 mB)', style: TextStyle(color: Colors.white38, fontSize: 11)),
+                            const AppText(
+                              'LoudnessEnhancer (0–1500 mB)',
+                              style: TextStyle(
+                                color: Colors.white38,
+                                fontSize: 11,
+                              ),
+                            ),
                           ],
                         ),
                       ),
@@ -4278,13 +4942,26 @@ class _PlayerScreenState extends State<PlayerScreen>
                     if (_liveSpatial == 'on') ...[
                       const Divider(color: Colors.white12, height: 1),
                       _tvListTile(
-                        leading: const Icon(Icons.music_note, color: Colors.white70),
-                        title: const Text('Bass Boost', style: TextStyle(color: Colors.white)),
-                        subtitle: Text(
-                          const ['Off', 'Low', 'Medium', 'High'][_liveBass.clamp(0, 3)],
-                          style: const TextStyle(color: Colors.white54, fontSize: 12),
+                        leading: const Icon(
+                          Icons.music_note,
+                          color: Colors.white70,
                         ),
-                        trailing: Icon(expandBass ? Icons.expand_less : Icons.expand_more, color: Colors.white54),
+                        title: const AppText(
+                          'Bass Boost',
+                          style: TextStyle(color: Colors.white),
+                        ),
+                        subtitle: AppText(
+                          const ['Off', 'Low', 'Medium', 'High'][_liveBass
+                              .clamp(0, 3)],
+                          style: const TextStyle(
+                            color: Colors.white54,
+                            fontSize: 12,
+                          ),
+                        ),
+                        trailing: Icon(
+                          expandBass ? Icons.expand_less : Icons.expand_more,
+                          color: Colors.white54,
+                        ),
                         onTap: () => setSheet(() => expandBass = !expandBass),
                       ),
                       if (expandBass)
@@ -4295,11 +4972,20 @@ class _PlayerScreenState extends State<PlayerScreen>
                               for (final level in [0, 1, 2, 3])
                                 _tvListTile(
                                   leading: Icon(
-                                    _liveBass == level ? Icons.radio_button_checked : Icons.radio_button_off,
-                                    color: _liveBass == level ? Colors.white : Colors.white54,
+                                    _liveBass == level
+                                        ? Icons.radio_button_checked
+                                        : Icons.radio_button_off,
+                                    color: _liveBass == level
+                                        ? Colors.white
+                                        : Colors.white54,
                                   ),
-                                  title: Text(
-                                    const ['Off', 'Low', 'Medium', 'High'][level],
+                                  title: AppText(
+                                    const [
+                                      'Off',
+                                      'Low',
+                                      'Medium',
+                                      'High',
+                                    ][level],
                                     style: const TextStyle(color: Colors.white),
                                   ),
                                   onTap: () {
@@ -4314,9 +5000,21 @@ class _PlayerScreenState extends State<PlayerScreen>
                     ],
                     const Divider(color: Colors.white12, height: 1),
                     _tvListTile(
-                      leading: const Icon(Icons.nights_stay, color: Colors.white70),
-                      title: const Text('Night Mode', style: TextStyle(color: Colors.white)),
-                      subtitle: Text(_nightMode ? 'On — compressed dynamic range' : 'Off', style: const TextStyle(color: Colors.white54, fontSize: 12)),
+                      leading: const Icon(
+                        Icons.nights_stay,
+                        color: Colors.white70,
+                      ),
+                      title: const AppText(
+                        'Night Mode',
+                        style: TextStyle(color: Colors.white),
+                      ),
+                      subtitle: AppText(
+                        _nightMode ? 'On — compressed dynamic range' : 'Off',
+                        style: const TextStyle(
+                          color: Colors.white54,
+                          fontSize: 12,
+                        ),
+                      ),
                       trailing: Switch(
                         value: _nightMode,
                         onChanged: (v) async {
@@ -4346,8 +5044,17 @@ class _PlayerScreenState extends State<PlayerScreen>
                   ],
                   _tvListTile(
                     leading: const Icon(Icons.skip_next, color: Colors.white70),
-                    title: const Text('Auto-play next', style: TextStyle(color: Colors.white)),
-                    subtitle: Text(_autoPlayNext ? 'On' : 'Off', style: const TextStyle(color: Colors.white54, fontSize: 12)),
+                    title: const AppText(
+                      'Auto-play next',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    subtitle: AppText(
+                      _autoPlayNext ? 'On' : 'Off',
+                      style: const TextStyle(
+                        color: Colors.white54,
+                        fontSize: 12,
+                      ),
+                    ),
                     trailing: Switch(
                       value: _autoPlayNext,
                       onChanged: (v) async {
@@ -4367,11 +5074,30 @@ class _PlayerScreenState extends State<PlayerScreen>
                   ),
                   const Divider(color: Colors.white12, height: 1),
                   _tvListTile(
-                    leading: const Icon(Icons.timer_outlined, color: Colors.white70),
-                    title: const Text('Subtitle delay', style: TextStyle(color: Colors.white)),
-                    subtitle: Text(_subtitleDelayLabel(_subtitleDelayMs), style: const TextStyle(color: Colors.white54, fontSize: 12)),
-                    trailing: Icon(expandSubtitleDelay ? Icons.expand_less : Icons.expand_more, color: Colors.white54),
-                    onTap: () => setSheet(() => expandSubtitleDelay = !expandSubtitleDelay),
+                    leading: const Icon(
+                      Icons.timer_outlined,
+                      color: Colors.white70,
+                    ),
+                    title: const AppText(
+                      'Subtitle delay',
+                      style: TextStyle(color: Colors.white),
+                    ),
+                    subtitle: AppText(
+                      _subtitleDelayLabel(_subtitleDelayMs),
+                      style: const TextStyle(
+                        color: Colors.white54,
+                        fontSize: 12,
+                      ),
+                    ),
+                    trailing: Icon(
+                      expandSubtitleDelay
+                          ? Icons.expand_less
+                          : Icons.expand_more,
+                      color: Colors.white54,
+                    ),
+                    onTap: () => setSheet(
+                      () => expandSubtitleDelay = !expandSubtitleDelay,
+                    ),
                   ),
                   if (expandSubtitleDelay)
                     Padding(
@@ -4379,7 +5105,10 @@ class _PlayerScreenState extends State<PlayerScreen>
                       child: Column(
                         children: [
                           Slider(
-                            value: _subtitleDelayMs.toDouble().clamp(-30000, 30000).toDouble(),
+                            value: _subtitleDelayMs
+                                .toDouble()
+                                .clamp(-30000, 30000)
+                                .toDouble(),
                             min: -30000,
                             max: 30000,
                             divisions: 60,
@@ -4396,34 +5125,89 @@ class _PlayerScreenState extends State<PlayerScreen>
                           Row(
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
-                              TextButton(onPressed: () async {
-                                await _applySubtitleDelay(0, setSheet);
-                              }, child: const Text('Reset')),
-                              Text(_subtitleDelayLabel(_subtitleDelayMs), style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                              TextButton(
+                                onPressed: () async {
+                                  await _applySubtitleDelay(0, setSheet);
+                                },
+                                child: const AppText('Reset'),
+                              ),
+                              AppText(
+                                _subtitleDelayLabel(_subtitleDelayMs),
+                                style: const TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 12,
+                                ),
+                              ),
                               Row(
                                 children: [
-                                  IconButton(icon: const Icon(Icons.remove, color: Colors.white70), onPressed: () async {
-                                    await _applySubtitleDelay((_subtitleDelayMs - 500).clamp(-30000, 30000), setSheet);
-                                  }),
-                                  IconButton(icon: const Icon(Icons.add, color: Colors.white70), onPressed: () async {
-                                    await _applySubtitleDelay((_subtitleDelayMs + 500).clamp(-30000, 30000), setSheet);
-                                  }),
+                                  IconButton(
+                                    icon: const Icon(
+                                      Icons.remove,
+                                      color: Colors.white70,
+                                    ),
+                                    onPressed: () async {
+                                      await _applySubtitleDelay(
+                                        (_subtitleDelayMs - 500).clamp(
+                                          -30000,
+                                          30000,
+                                        ),
+                                        setSheet,
+                                      );
+                                    },
+                                  ),
+                                  IconButton(
+                                    icon: const Icon(
+                                      Icons.add,
+                                      color: Colors.white70,
+                                    ),
+                                    onPressed: () async {
+                                      await _applySubtitleDelay(
+                                        (_subtitleDelayMs + 500).clamp(
+                                          -30000,
+                                          30000,
+                                        ),
+                                        setSheet,
+                                      );
+                                    },
+                                  ),
                                 ],
                               ),
                             ],
                           ),
-                          const Text('Live on iOS · reopens at same position on Android', style: TextStyle(color: Colors.white38, fontSize: 11)),
+                          const AppText(
+                            'Live on iOS · reopens at same position on Android',
+                            style: TextStyle(
+                              color: Colors.white38,
+                              fontSize: 11,
+                            ),
+                          ),
                         ],
                       ),
                     ),
                   if (_chapters.isNotEmpty) ...[
                     const Divider(color: Colors.white12, height: 1),
                     _tvListTile(
-                      leading: const Icon(Icons.format_list_numbered, color: Colors.white70),
-                      title: const Text('Chapters', style: TextStyle(color: Colors.white)),
-                      subtitle: Text('${_chapters.length} chapters', style: const TextStyle(color: Colors.white54, fontSize: 12)),
-                      trailing: Icon(expandChapters ? Icons.expand_less : Icons.expand_more, color: Colors.white54),
-                      onTap: () => setSheet(() => expandChapters = !expandChapters),
+                      leading: const Icon(
+                        Icons.format_list_numbered,
+                        color: Colors.white70,
+                      ),
+                      title: const AppText(
+                        'Chapters',
+                        style: TextStyle(color: Colors.white),
+                      ),
+                      subtitle: AppText(
+                        '${_chapters.length} chapters',
+                        style: const TextStyle(
+                          color: Colors.white54,
+                          fontSize: 12,
+                        ),
+                      ),
+                      trailing: Icon(
+                        expandChapters ? Icons.expand_less : Icons.expand_more,
+                        color: Colors.white54,
+                      ),
+                      onTap: () =>
+                          setSheet(() => expandChapters = !expandChapters),
                     ),
                     if (expandChapters)
                       Padding(
@@ -4431,28 +5215,63 @@ class _PlayerScreenState extends State<PlayerScreen>
                         child: Column(
                           children: [
                             for (int i = 0; i < _chapters.length; i++)
-                              Builder(builder: (context) {
-                                final ch = _chapters[i];
-                                final next = i + 1 < _chapters.length ? _chapters[i + 1].startMs : ch.endMs;
-                                final posMs = _position.inMilliseconds;
-                                final isCurrent = posMs >= ch.startMs && (next == null || posMs < next);
-                                return _tvListTile(
-                                  leading: Icon(
-                                    isCurrent ? Icons.play_arrow : Icons.history_edu_outlined,
-                                    color: isCurrent ? Theme.of(context).colorScheme.primary : Colors.white54,
-                                  ),
-                                  title: Text(ch.title, maxLines: 1, overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(color: isCurrent ? Colors.white : Colors.white70, fontWeight: isCurrent ? FontWeight.w600 : FontWeight.w400)),
-                                  subtitle: Text(_formatDuration(Duration(milliseconds: ch.startMs)), style: const TextStyle(color: Colors.white38, fontSize: 12)),
-                                  onTap: () {
-                                    Navigator.of(sheetContext).pop();
-                                    _seekBackend(Duration(milliseconds: ch.startMs));
-                                    if (!_playing && !_completed && !_mpvReady) {
-                                      _exo?.play();
-                                    }
-                                  },
-                                );
-                              }),
+                              Builder(
+                                builder: (context) {
+                                  final ch = _chapters[i];
+                                  final next = i + 1 < _chapters.length
+                                      ? _chapters[i + 1].startMs
+                                      : ch.endMs;
+                                  final posMs = _position.inMilliseconds;
+                                  final isCurrent =
+                                      posMs >= ch.startMs &&
+                                      (next == null || posMs < next);
+                                  return _tvListTile(
+                                    leading: Icon(
+                                      isCurrent
+                                          ? Icons.play_arrow
+                                          : Icons.history_edu_outlined,
+                                      color: isCurrent
+                                          ? Theme.of(
+                                              context,
+                                            ).colorScheme.primary
+                                          : Colors.white54,
+                                    ),
+                                    title: AppText(
+                                      ch.title,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        color: isCurrent
+                                            ? Colors.white
+                                            : Colors.white70,
+                                        fontWeight: isCurrent
+                                            ? FontWeight.w600
+                                            : FontWeight.w400,
+                                      ),
+                                    ),
+                                    subtitle: AppText(
+                                      _formatDuration(
+                                        Duration(milliseconds: ch.startMs),
+                                      ),
+                                      style: const TextStyle(
+                                        color: Colors.white38,
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                    onTap: () {
+                                      Navigator.of(sheetContext).pop();
+                                      _seekBackend(
+                                        Duration(milliseconds: ch.startMs),
+                                      );
+                                      if (!_playing &&
+                                          !_completed &&
+                                          !_mpvReady) {
+                                        _exo?.play();
+                                      }
+                                    },
+                                  );
+                                },
+                              ),
                           ],
                         ),
                       ),
@@ -4476,7 +5295,9 @@ class _PlayerScreenState extends State<PlayerScreen>
       await updated.save();
       await _exo?.setSubtitleStyle(updated);
       _subtitleStyle = updated;
-      if (Platform.isAndroid && !_mpvReady && (_subtitleTracks.isNotEmpty || _subtitleOn)) {
+      if (Platform.isAndroid &&
+          !_mpvReady &&
+          (_subtitleTracks.isNotEmpty || _subtitleOn)) {
         await _reopenAt(_position, _duration);
       }
     } catch (_) {}
@@ -4484,11 +5305,7 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   void _seekBy(Duration delta) {
     if (_touchLocked) return;
-    if (_mpvReady) {
-      unawaited(_mpvSeek(_position + delta));
-    } else {
-      _exo?.seekTo(_position + delta);
-    }
+    _seekBackend(_position + delta);
     _showControls();
   }
 
@@ -4539,7 +5356,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       unawaited(() async {
         if (_completed) {
           _completed = false;
-          await mpv.seek(Duration.zero);
+          await _mpvSeek(Duration.zero);
           await mpv.play();
         } else if (_playing) {
           await mpv.pause();
@@ -4553,6 +5370,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     final exo = _exo;
     if (exo == null) return;
     if (_completed) {
+      _markDanmakuSeek(Duration.zero);
       exo.seekTo(Duration.zero);
       exo.play();
     } else if (_playing) {
@@ -4622,7 +5440,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(
+          AppText(
             _formatDuration(target),
             style: const TextStyle(
               color: Colors.white,
@@ -4631,7 +5449,7 @@ class _PlayerScreenState extends State<PlayerScreen>
             ),
           ),
           const SizedBox(width: 10),
-          Text(
+          AppText(
             '$sign${_formatDuration(delta)}',
             style: TextStyle(
               color: deltaMs >= 0
@@ -4659,7 +5477,10 @@ class _PlayerScreenState extends State<PlayerScreen>
       final raw = _liveVideoCodecRaw ?? _current.hdrHint ?? '';
       final mime = _liveVideoMimeRaw;
       // Prefer codec, fall back to mime/hint.
-      final lab = dolbyVisionLabel(raw.isNotEmpty ? raw : mime, fallbackHint: _current.hdrHint);
+      final lab = dolbyVisionLabel(
+        raw.isNotEmpty ? raw : mime,
+        fallbackHint: _current.hdrHint,
+      );
       // dolbyVisionLabel returns generic when no profile; show P8 etc when known.
       return lab;
     }
@@ -4694,7 +5515,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (_mpvReady) return _mpvVideoCodecLabel;
     final label = _liveVideoCodec ?? _current.videoCodecLabel;
     if (label == null) return null;
-    if (_effectiveHdr == HdrFormat.dolbyVision && label.startsWith('Dolby Vision')) {
+    if (_effectiveHdr == HdrFormat.dolbyVision &&
+        label.startsWith('Dolby Vision')) {
       return null;
     }
     return label;
@@ -4765,35 +5587,27 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (_badgeVideoCodec) {
         final vc = _mpvReady ? _mpvVideoCodecLabel : _videoCodecInfoLabel;
         if (vc != null) {
-          chips.add(FormatChip(
-            label: vc,
-            color: const Color(0xFF4FC3F7),
-          ));
+          chips.add(FormatChip(label: vc, color: const Color(0xFF4FC3F7)));
         }
       }
       // Resolution — both engines.
       if (_badgeResolution) {
-        final res = _mpvReady ? _mpvResolution : (_liveResolution ?? _current.resolution);
+        final res = _mpvReady
+            ? _mpvResolution
+            : (_liveResolution ?? _current.resolution);
         if (res != null) {
-          chips.add(FormatChip(
-            label: res,
-            color: const Color(0xFF90A4AE),
-          ));
+          chips.add(FormatChip(label: res, color: const Color(0xFF90A4AE)));
         }
       }
       // Spatial audio — Android only, both engines (spatial is platform-level).
       if (_badgeSpatialAudio && Platform.isAndroid && _liveSpatial == 'on') {
-        chips.add(const FormatChip(
-          label: 'Spatial',
-          color: Color(0xFF26A69A),
-        ));
+        chips.add(const FormatChip(label: 'Spatial', color: Color(0xFF26A69A)));
       }
       // Server transcoding — both engines.
       if (_badgeServerTranscode && _transcodeActive) {
-        chips.add(const FormatChip(
-          label: 'Transcoding',
-          color: Color(0xFFEF5350),
-        ));
+        chips.add(
+          const FormatChip(label: 'Transcoding', color: Color(0xFFEF5350)),
+        );
       }
       // Decoder — both engines.
       if (_badgeDecoder) {
@@ -4801,18 +5615,17 @@ class _PlayerScreenState extends State<PlayerScreen>
           final label = _mpvHwdecMode == 'no'
               ? 'SW decode'
               : _mpvHwdecMode == 'mediacodec'
-                  ? 'HW decode'
-                  : 'HW decode (auto)';
-          chips.add(FormatChip(
-            label: label,
-            color: const Color(0xFFFFB74D),
-          ));
+              ? 'HW decode'
+              : 'HW decode (auto)';
+          chips.add(FormatChip(label: label, color: const Color(0xFFFFB74D)));
         } else if (Platform.isAndroid && _liveDecoderName != null) {
           final hw = _isHwDecoder ?? true;
-          chips.add(FormatChip(
-            label: '${hw ? 'HW' : 'SW'} decode',
-            color: const Color(0xFFFFB74D),
-          ));
+          chips.add(
+            FormatChip(
+              label: '${hw ? 'HW' : 'SW'} decode',
+              color: const Color(0xFFFFB74D),
+            ),
+          );
         }
       }
     }
@@ -4832,46 +5645,42 @@ class _PlayerScreenState extends State<PlayerScreen>
       children: [
         _mpvReady
             ? (_mpvAspect != null
-                ? Center(
-                    child: AspectRatio(
-                      aspectRatio: _mpvAspect!,
-                      child: Transform.scale(
-                        scale: _mpvZoomScale,
-                        child: Video(
-                          controller: _mpvController!,
-                          fit: _mpvFit,
-                          controls: NoVideoControls,
-                          subtitleViewConfiguration:
-                              const SubtitleViewConfiguration(
-                            visible: false,
+                  ? Center(
+                      child: AspectRatio(
+                        aspectRatio: _mpvAspect!,
+                        child: Transform.scale(
+                          scale: _mpvZoomScale,
+                          child: Video(
+                            controller: _mpvController!,
+                            fit: _mpvFit,
+                            controls: NoVideoControls,
+                            subtitleViewConfiguration:
+                                const SubtitleViewConfiguration(visible: false),
                           ),
                         ),
                       ),
-                    ),
-                  )
-                : Transform.scale(
-                    scale: _mpvZoomScale,
-                    child: Video(
-                      controller: _mpvController!,
-                      fit: _mpvFit,
-                      controls: NoVideoControls,
-                      subtitleViewConfiguration:
-                          const SubtitleViewConfiguration(
-                        visible: false,
+                    )
+                  : Transform.scale(
+                      scale: _mpvZoomScale,
+                      child: Video(
+                        controller: _mpvController!,
+                        fit: _mpvFit,
+                        controls: NoVideoControls,
+                        subtitleViewConfiguration:
+                            const SubtitleViewConfiguration(visible: false),
                       ),
-                    ),
-                  ))
+                    ))
             : _exo != null && _error == null
-                ? ExoPlayerView(controller: _exo! as ExoPlayerController)
-                : Container(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        colors: [colorScheme.primaryContainer, Colors.black],
-                      ),
-                    ),
+            ? ExoPlayerView(controller: _exo! as ExoPlayerController)
+            : Container(
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [colorScheme.primaryContainer, Colors.black],
                   ),
+                ),
+              ),
         // Fallback-engine brightness dims the Flutter video texture (the app
         // window-brightness path lives on the native platform view). Only
         // engaged by the left-half swipe gesture in mpv mode.
@@ -4879,9 +5688,28 @@ class _PlayerScreenState extends State<PlayerScreen>
           Positioned.fill(
             child: IgnorePointer(
               child: ColoredBox(
-                color: Colors.black
-                    .withValues(alpha: (1.0 - _mpvBrightness).clamp(0.0, 1.0)),
+                color: Colors.black.withValues(
+                  alpha: (1.0 - _mpvBrightness).clamp(0.0, 1.0),
+                ),
               ),
+            ),
+          ),
+        // Keep danmaku in the video composition band. MPV subtitles are the
+        // next sibling, so they remain legible above comments; safeArea and
+        // the default 80% band also reserve the subtitle region for native
+        // Media3/AetherEngine platform views.
+        if (_danmakuVisible && _danmakuConfigured && !_inPip)
+          Positioned.fill(
+            child: DanmakuOverlay(
+              key: _danmakuOverlayKey,
+              events: _danmakuClockController.stream,
+              initial: _danmakuClock,
+              option: _danmakuOption,
+              onControllerReady: (controller) {
+                _danmakuCanvasController = controller;
+                controller.updateOption(_danmakuOption);
+                _syncDanmakuItems();
+              },
             ),
           ),
         // Custom subtitle overlay for MPV — replaces media_kit's built-in
@@ -4924,13 +5752,15 @@ class _PlayerScreenState extends State<PlayerScreen>
               // Verified via javap on media3-ui-1.10.1: defaultTextSize=0.0533f,
               // bottomPaddingFraction=0.08f. ExoPlayerView.kt applies
               // 0.0533 * sizeMult to the SubtitleView inside AspectRatioFrameLayout.
-              final fontSize =
-                  (h * 0.0533 * _subtitleStyle.sizeMultiplier).clamp(12.0, 300.0);
+              final fontSize = (h * 0.0533 * _subtitleStyle.sizeMultiplier)
+                  .clamp(12.0, 300.0);
               // Vertical position (0-255): 0 = bottom, 255 = top.
               // Match Media3's setBottomPaddingFraction(vPos/255.0f) — the
               // fraction is of the SubtitleView (= video content area) height.
-              final vPos = _subtitleStyle.verticalPosition
-                  .clamp(SubtitleStyle.minVerticalPosition, SubtitleStyle.maxVerticalPosition);
+              final vPos = _subtitleStyle.verticalPosition.clamp(
+                SubtitleStyle.minVerticalPosition,
+                SubtitleStyle.maxVerticalPosition,
+              );
               final bottomPadding = letterboxBottom + h * (vPos / 255.0);
               return Stack(
                 children: [
@@ -4938,7 +5768,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                     left: left + 16,
                     right: sw - left - w + 16,
                     bottom: bottomPadding,
-                    child: Text(
+                    child: AppText(
                       _mpvSubtitleLines.join('\n'),
                       textAlign: TextAlign.center,
                       style: TextStyle(
@@ -4951,8 +5781,9 @@ class _PlayerScreenState extends State<PlayerScreen>
                             ? Color(
                                 (_subtitleStyle.backgroundColorValue &
                                         0x00FFFFFF) |
-                                    ((_subtitleStyle.backgroundOpacity & 0xFF)
-                                        << 24),
+                                    ((_subtitleStyle.backgroundOpacity &
+                                            0xFF) <<
+                                        24),
                               )
                             : null,
                         shadows: _subtitleStyle.outline
@@ -5129,7 +5960,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                           child: Column(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              Text(
+                              AppText(
                                 _mpvError!,
                                 textAlign: TextAlign.center,
                                 style: const TextStyle(color: Colors.white70),
@@ -5140,79 +5971,82 @@ class _PlayerScreenState extends State<PlayerScreen>
                                   _mpvFailed = false;
                                   _mpvError = null;
                                   setState(() {});
-                                  _reloadMpv(_current, _position.inMilliseconds);
+                                  _reloadMpv(
+                                    _current,
+                                    _position.inMilliseconds,
+                                  );
                                 },
                                 icon: const Icon(Icons.refresh),
-                                label: const Text('Retry'),
+                                label: const AppText('Retry'),
                                 style: OutlinedButton.styleFrom(
                                   foregroundColor: Colors.white,
-                                  side: const BorderSide(
-                                      color: Colors.white38),
+                                  side: const BorderSide(color: Colors.white38),
                                 ),
                               ),
                             ],
                           ),
                         )
                       : _error != null
-                          ? Padding(
-                              padding: const EdgeInsets.all(24),
-                              child: Column(
+                      ? Padding(
+                          padding: const EdgeInsets.all(24),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              AppText(
+                                _error!,
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(color: Colors.white70),
+                              ),
+                              const SizedBox(height: 20),
+                              // Retry reopens the file with Media3;
+                              // "Try with MPV" switches engines.
+                              Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
-                                  Text(
-                                    _error!,
-                                    textAlign: TextAlign.center,
-                                    style: const TextStyle(
-                                        color: Colors.white70),
+                                  OutlinedButton.icon(
+                                    onPressed: () {
+                                      _error = null;
+                                      _ioRetries = 0;
+                                      _retrying = false;
+                                      setState(() {});
+                                      _reopenAt(_position, _duration);
+                                    },
+                                    icon: const Icon(Icons.refresh),
+                                    label: const AppText('Retry'),
+                                    style: OutlinedButton.styleFrom(
+                                      foregroundColor: Colors.white,
+                                      side: const BorderSide(
+                                        color: Colors.white38,
+                                      ),
+                                    ),
                                   ),
-                                  const SizedBox(height: 20),
-                                  // Retry reopens the file with Media3;
-                                  // "Try with MPV" switches engines.
-                                  Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      OutlinedButton.icon(
-                                        onPressed: () {
-                                          _error = null;
-                                          _ioRetries = 0;
-                                          _retrying = false;
-                                          setState(() {});
-                                          _reopenAt(_position, _duration);
-                                        },
-                                        icon: const Icon(Icons.refresh),
-                                        label: const Text('Retry'),
-                                        style: OutlinedButton.styleFrom(
-                                          foregroundColor: Colors.white,
-                                          side: const BorderSide(
-                                              color: Colors.white38),
+                                  if (Platform.isAndroid &&
+                                      _mpvSourceFor(_current).isNotEmpty) ...[
+                                    const SizedBox(width: 12),
+                                    OutlinedButton.icon(
+                                      onPressed: _mpvActive
+                                          ? null
+                                          : () => _startMpvManual(),
+                                      icon: const Icon(Icons.play_arrow),
+                                      label: const AppText('Try with MPV'),
+                                      style: OutlinedButton.styleFrom(
+                                        foregroundColor: Colors.white,
+                                        side: const BorderSide(
+                                          color: Colors.white38,
                                         ),
                                       ),
-                                      if (Platform.isAndroid &&
-                                          _mpvSourceFor(_current).isNotEmpty) ...[
-                                        const SizedBox(width: 12),
-                                        OutlinedButton.icon(
-                                          onPressed: _mpvActive
-                                              ? null
-                                              : () => _startMpvManual(),
-                                          icon: const Icon(Icons.play_arrow),
-                                          label: const Text('Try with MPV'),
-                                          style: OutlinedButton.styleFrom(
-                                            foregroundColor: Colors.white,
-                                            side: const BorderSide(
-                                                color: Colors.white38),
-                                          ),
-                                        ),
-                                      ],
-                                    ],
-                                  ),
+                                    ),
+                                  ],
                                 ],
                               ),
-                            )
-                          : const Icon(
-                              Icons.movie_filter,
-                              size: 96,
-                              color: Colors.white24,
-                            ),
+                            ],
+                          ),
+                        )
+                      : const Icon(
+                          Icons.movie_filter,
+                          size: 96,
+                          color: Colors.white24,
+                        ),
                 ),
               ),
             // Double-tap seek ripple (±10 s on the tapped half).
@@ -5293,7 +6127,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                           ),
                         ),
                         const SizedBox(height: 6),
-                        Text(
+                        AppText(
                           '${(_swipeCurrentValue * 100).round()}%',
                           style: const TextStyle(
                             color: Colors.white,
@@ -5343,7 +6177,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                             ),
                             const SizedBox(width: 4),
                             Expanded(
-                              child: Text(
+                              child: AppText(
                                 video.title,
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
@@ -5355,11 +6189,11 @@ class _PlayerScreenState extends State<PlayerScreen>
                               ),
                             ),
                             _TvControlButton(
-                                onPressed: _openVideoInfoSheet,
-                                icon: const Icon(Icons.info_outline),
-                                color: Colors.white,
-                                onFocusChange: (_) => _showControls(),
-                              ),
+                              onPressed: _openVideoInfoSheet,
+                              icon: const Icon(Icons.info_outline),
+                              color: Colors.white,
+                              onFocusChange: (_) => _showControls(),
+                            ),
                             const SizedBox(width: 4),
                           ],
                         ),
@@ -5372,8 +6206,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                         if (!_inPip && chips.isNotEmpty) ...[
                           const SizedBox(height: 4),
                           Padding(
-                            padding:
-                                const EdgeInsets.symmetric(horizontal: 8),
+                            padding: const EdgeInsets.symmetric(horizontal: 8),
                             child: Wrap(
                               spacing: 8,
                               runSpacing: 4,
@@ -5478,7 +6311,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                                 mainAxisAlignment:
                                     MainAxisAlignment.spaceBetween,
                                 children: [
-                                  Text(
+                                  AppText(
                                     _formatDuration(
                                       _dragging
                                           ? Duration(
@@ -5488,7 +6321,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                                     ),
                                     style: const TextStyle(color: Colors.white),
                                   ),
-                                  Text(
+                                  AppText(
                                     _formatDuration(total),
                                     style: const TextStyle(color: Colors.white),
                                   ),
@@ -5513,22 +6346,40 @@ class _PlayerScreenState extends State<PlayerScreen>
                                     onPressed: _openAudioTrackSheet,
                                     icon: const Icon(Icons.graphic_eq),
                                     color: Colors.white,
+                                    tooltip: context.tr('Audio tracks'),
+                                    onFocusChange: (_) => _showControls(),
+                                  ),
+                                  _TvControlButton(
+                                    onPressed: () => unawaited(
+                                      _setDanmakuVisible(!_danmakuVisible),
+                                    ),
+                                    icon: Icon(
+                                      _danmakuVisible
+                                          ? Icons.chat_bubble
+                                          : Icons.chat_bubble_outline,
+                                    ),
+                                    color: _danmakuVisible
+                                        ? const Color(0xFF4FC3F7)
+                                        : Colors.white54,
+                                    tooltip: _danmakuVisible
+                                        ? context.tr('Hide danmaku')
+                                        : context.tr('Show danmaku'),
                                     onFocusChange: (_) => _showControls(),
                                   ),
                                   _TvControlButton(
                                     onPressed: _openSubtitleSheet,
                                     icon: Icon(
-                                      (_mpvReady
-                                              ? _mpvSubtitleOn
-                                              : _subtitleOn)
+                                      (_mpvReady ? _mpvSubtitleOn : _subtitleOn)
                                           ? Icons.closed_caption
                                           : Icons.closed_caption_off,
                                     ),
-                                    color: (_mpvReady
+                                    color:
+                                        (_mpvReady
                                             ? _mpvSubtitleOn
                                             : _subtitleOn)
                                         ? Colors.white
                                         : Colors.white54,
+                                    tooltip: context.tr('Subtitles'),
                                     onFocusChange: (_) => _showControls(),
                                   ),
                                   _TvControlButton(
@@ -5695,18 +6546,24 @@ class _BufferedSeekBarState extends State<_BufferedSeekBar> {
       child: LayoutBuilder(
         builder: (context, constraints) {
           final totalWidth = constraints.maxWidth;
-          final trackWidth = (totalWidth - (_horizontalPadding * 2)).clamp(0.0, double.infinity);
+          final trackWidth = (totalWidth - (_horizontalPadding * 2)).clamp(
+            0.0,
+            double.infinity,
+          );
           final thumbX = _horizontalPadding + positionFraction * trackWidth;
           final bufferWidth = bufferFraction * trackWidth;
           final activeWidth = positionFraction * trackWidth;
 
           return GestureDetector(
             behavior: HitTestBehavior.opaque,
-            onTapDown: (details) => _handleTouchStart(details.localPosition, totalWidth),
+            onTapDown: (details) =>
+                _handleTouchStart(details.localPosition, totalWidth),
             onTapUp: (_) => _handleTouchEnd(),
             onTapCancel: () => _handleTouchEnd(),
-            onHorizontalDragStart: (details) => _handleTouchStart(details.localPosition, totalWidth),
-            onHorizontalDragUpdate: (details) => _handleTouchUpdate(details.localPosition, totalWidth),
+            onHorizontalDragStart: (details) =>
+                _handleTouchStart(details.localPosition, totalWidth),
+            onHorizontalDragUpdate: (details) =>
+                _handleTouchUpdate(details.localPosition, totalWidth),
             onHorizontalDragEnd: (_) => _handleTouchEnd(),
             onHorizontalDragCancel: () => _handleTouchEnd(),
             child: AnimatedContainer(
@@ -5715,11 +6572,15 @@ class _BufferedSeekBarState extends State<_BufferedSeekBar> {
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(8),
                 color: isFocused
-                    ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.12)
+                    ? Theme.of(
+                        context,
+                      ).colorScheme.primary.withValues(alpha: 0.12)
                     : Colors.transparent,
                 border: Border.all(
                   color: isFocused
-                      ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.7)
+                      ? Theme.of(
+                          context,
+                        ).colorScheme.primary.withValues(alpha: 0.7)
                       : Colors.transparent,
                   width: 2,
                 ),
@@ -5755,7 +6616,10 @@ class _BufferedSeekBarState extends State<_BufferedSeekBar> {
                   ),
                   // Active progress fill (white)
                   Positioned(
-                    top: (_touchHeight - (_dragging ? _activeTrackHeight : _trackHeight)) / 2,
+                    top:
+                        (_touchHeight -
+                            (_dragging ? _activeTrackHeight : _trackHeight)) /
+                        2,
                     left: _horizontalPadding,
                     width: activeWidth,
                     child: AnimatedContainer(
@@ -5786,7 +6650,9 @@ class _BufferedSeekBarState extends State<_BufferedSeekBar> {
                           ),
                           if (_dragging)
                             BoxShadow(
-                              color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.6),
+                              color: Theme.of(
+                                context,
+                              ).colorScheme.primary.withValues(alpha: 0.6),
                               blurRadius: 8,
                               spreadRadius: 3,
                             ),
@@ -5879,6 +6745,7 @@ class _TvControlButton extends StatefulWidget {
     this.autofocus = false,
     this.onFocusChange,
     this.alwaysShowRing = false,
+    this.tooltip,
   });
 
   final Widget icon;
@@ -5888,6 +6755,7 @@ class _TvControlButton extends StatefulWidget {
   final Color? color;
   final bool autofocus;
   final ValueChanged<bool>? onFocusChange;
+  final String? tooltip;
 
   /// When true the button always renders its ring highlight (border + glow),
   /// even without keyboard/remote focus. Used for the center play/pause button
@@ -5972,6 +6840,7 @@ class _TvControlButtonState extends State<_TvControlButton> {
                 iconSize: widget.iconSize,
                 icon: widget.icon,
                 color: widget.color ?? Colors.white,
+                tooltip: widget.tooltip,
               ),
             ),
           );
@@ -5986,4 +6855,3 @@ class _TvControlButtonState extends State<_TvControlButton> {
 /// Lives next to the ⓘ button in the player top bar; hidden entirely in
 /// pip mode (the parent gates the widget out so the floating window shows
 /// only the video). When the speed is still loading (the player hasn't
-

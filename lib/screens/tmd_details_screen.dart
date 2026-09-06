@@ -5,6 +5,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../models/hdr_format.dart';
 import '../models/video_item.dart';
+import '../danmaku/scraper/scrape_state.dart';
 import '../services/file_browser.dart';
 import '../services/jellyfin_client.dart';
 import '../services/library_folders.dart';
@@ -17,8 +18,10 @@ import '../utils/season_group.dart' as sg;
 import '../widgets/season_progress_ring.dart';
 import '../widgets/tv_tile.dart';
 import 'folder_screen.dart';
+import 'danmaku_scrape_screen.dart';
 import 'opensubtitles_sheet.dart';
 import 'player_screen.dart';
+import '../l10n/app_localizations.dart';
 
 /// Shows TMDB metadata with a Play/Resume button and a "Fix match" manual
 /// search.
@@ -50,18 +53,23 @@ class TmdDetailsScreen extends StatefulWidget {
 }
 
 class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
-  late final String _identityKey = widget.folder?.metadataKey ??
-      TmdStore.identityKeyFor(widget.video!);
+  late final String _identityKey =
+      widget.folder?.metadataKey ?? TmdStore.identityKeyFor(widget.video!);
   late final String _resumeKey = widget.folder == null
-      ? (widget.video!.resumeKey ?? widget.video!.path ?? widget.video!.uri ?? '')
+      ? (widget.video!.resumeKey ??
+            widget.video!.path ??
+            widget.video!.uri ??
+            '')
       : '';
+
   /// When the video came from a plain file path (no library folder), the
   /// parent folder's name is our only hint for episodes named just
   /// `Episode01.mkv` / `01.mkv`. Pulls the last path segment and decodes
   /// percent-escapes (URL-style SMB paths sometimes carry them).
   String get _parentFolderNameFromPath => _computeParentFolderName();
-  late final ParsedFileName _parsed =
-      ParsedFileName.parse(widget.folder?.name ?? widget.video!.title);
+  late final ParsedFileName _parsed = ParsedFileName.parse(
+    widget.folder?.name ?? widget.video!.title,
+  );
 
   String _computeParentFolderName() {
     final path = widget.video!.path ?? widget.video!.uri ?? '';
@@ -98,7 +106,9 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
       final decoded = Uri.decodeComponent(docId);
       // Strip the volume prefix (`primary:`, `treeprimary:` etc.)
       final colonIdx = decoded.indexOf(':');
-      final withoutVolume = colonIdx >= 0 ? decoded.substring(colonIdx + 1) : decoded;
+      final withoutVolume = colonIdx >= 0
+          ? decoded.substring(colonIdx + 1)
+          : decoded;
       // Get parent folder from the decoded path.
       final parts = withoutVolume.split('/');
       if (parts.length < 2) return '';
@@ -107,6 +117,7 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
       return '';
     }
   }
+
   final TmdService _service = TmdService.instance;
 
   TmdMeta? _meta;
@@ -114,8 +125,8 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
   bool _loading = true;
 
   /// Saved playhead for this video per engine.
-  Duration? _resumePosition;     // Media3 playhead
-  Duration? _resumePositionMpv;  // MPV playhead
+  Duration? _resumePosition; // Media3 playhead
+  Duration? _resumePositionMpv; // MPV playhead
 
   /// Folder mode only: the folder's direct entries (files + subfolders).
   List<FileEntry> _entries = const [];
@@ -164,6 +175,39 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
     });
   }
 
+  List<ScrapeVideo> _currentDanmakuVideos() {
+    if (widget.folder == null) return const [];
+    if (widget.folder!.isJellyfin) {
+      final server = _jellyfinServer;
+      if (server == null) return const [];
+      return [
+        for (final item in _jellyfinEntries)
+          if (item.isPlayable)
+            ScrapeVideo(
+              key: _jellyfin.resumeKey(server, item),
+              fileName: item.name,
+              season: item.parentIndexNumber,
+              episode: item.indexNumber,
+            ),
+      ];
+    }
+    return [
+      for (final entry in _entries)
+        if (!entry.isDirectory)
+          ScrapeVideo(
+            key: entry.resumeKey ?? entry.path,
+            fileName: entry.name,
+            sizeBytes: entry.size,
+            season: ParsedFileName.parse(entry.name).season > 0
+                ? ParsedFileName.parse(entry.name).season
+                : null,
+            episode: ParsedFileName.parse(entry.name).episode > 0
+                ? ParsedFileName.parse(entry.name).episode
+                : null,
+          ),
+    ];
+  }
+
   Future<void> _refreshWatched() async {
     try {
       final watched = await WatchedStore.load();
@@ -192,8 +236,7 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
     } catch (_) {}
   }
 
-  String? _watchedKeyForFile(FileEntry e) =>
-      e.isDirectory ? null : e.resumeKey;
+  String? _watchedKeyForFile(FileEntry e) => e.isDirectory ? null : e.resumeKey;
 
   String? _watchedKeyForJellyfin(JellyfinItem i) {
     final s = _jellyfinServer;
@@ -274,8 +317,9 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
       return;
     }
     try {
-      final entries =
-          await FileBrowserService.instance.listDirectory(widget.folder!.path);
+      final entries = await FileBrowserService.instance.listDirectory(
+        widget.folder!.path,
+      );
       if (!mounted) return;
       setState(() {
         _entries = entries;
@@ -307,16 +351,19 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
   Future<void> _loadJellyfinEntries() async {
     final folder = widget.folder!;
     try {
-      final server =
-          await _jellyfin.serverForUrl(folder.jellyfinServerUrl ?? '');
+      final server = await _jellyfin.serverForUrl(
+        folder.jellyfinServerUrl ?? '',
+      );
       if (server == null || !server.isAuthenticated) {
         throw const JellyfinException(
           'Jellyfin server is not signed in — open the Jellyfin screen and '
           'sign in first.',
         );
       }
-      final items =
-          await _jellyfin.getItems(server, folder.jellyfinItemId ?? '');
+      final items = await _jellyfin.getItems(
+        server,
+        folder.jellyfinItemId ?? '',
+      );
       if (!mounted) return;
       final folders = items.where((i) => i.isFolder).toList()
         ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
@@ -337,7 +384,6 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
       });
     }
   }
-
 
   /// Refreshes the folder's server-side metadata (poster/title/year/overview)
   /// from the Jellyfin server. Best-effort: a failure keeps whatever was passed
@@ -375,7 +421,7 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
     // and still frames once the season list is loaded.
     if (widget.folder == null &&
         _parsed.isEpisode &&
-        _parsed.season > 0 &&
+        _parsed.season >= 0 &&
         _parsed.episode > 0) {
       await _service.episodeDetailsFor(
         _identityKey,
@@ -395,7 +441,7 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
         return _jellyfinEntries
             .where((i) => i.isPlayable)
             .map((i) => i.parentIndexNumber ?? 0)
-            .where((s) => s > 0)
+            .where((s) => s >= 0)
             .toSet()
             .toList();
       }
@@ -404,11 +450,13 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
           .map((e) => ParsedFileName.parse(e.name))
           .where((p) => p.isEpisode)
           .map((p) => p.season)
-          .where((s) => s > 0)
+          .where((s) => s >= 0)
           .toSet()
           .toList();
     }
-    if (_parsed.isEpisode) return [_parsed.season].where((s) => s > 0).toList();
+    if (_parsed.isEpisode) {
+      return [_parsed.season].where((s) => s >= 0).toList();
+    }
     return const [];
   }
 
@@ -446,14 +494,17 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
     }
     final video = widget.video;
     if (video != null && video.duration > Duration.zero) {
-      if (position != null && video.duration - position < const Duration(seconds: 5)) {
+      if (position != null &&
+          video.duration - position < const Duration(seconds: 5)) {
         position = null;
       }
-      if (positionMpv != null && video.duration - positionMpv < const Duration(seconds: 5)) {
+      if (positionMpv != null &&
+          video.duration - positionMpv < const Duration(seconds: 5)) {
         positionMpv = null;
       }
     }
-    if (mounted && (position != _resumePosition || positionMpv != _resumePositionMpv)) {
+    if (mounted &&
+        (position != _resumePosition || positionMpv != _resumePositionMpv)) {
       setState(() {
         _resumePosition = position;
         _resumePositionMpv = positionMpv;
@@ -544,11 +595,15 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
                     onPressed: () => _play(engine: PlayEngine.mpv),
                     style: FilledButton.styleFrom(
                       minimumSize: const Size.fromHeight(48),
-                      backgroundColor: Theme.of(context).colorScheme.secondaryContainer,
-                      foregroundColor: Theme.of(context).colorScheme.onSecondaryContainer,
+                      backgroundColor: Theme.of(
+                        context,
+                      ).colorScheme.secondaryContainer,
+                      foregroundColor: Theme.of(
+                        context,
+                      ).colorScheme.onSecondaryContainer,
                     ),
                     icon: icon,
-                    label: Text(label, overflow: TextOverflow.ellipsis),
+                    label: AppText(label, overflow: TextOverflow.ellipsis),
                   )
                 : OutlinedButton.icon(
                     onPressed: () => _play(engine: PlayEngine.mpv),
@@ -556,15 +611,16 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
                       minimumSize: const Size.fromHeight(48),
                     ),
                     icon: icon,
-                    label: Text(label, overflow: TextOverflow.ellipsis),
+                    label: AppText(label, overflow: TextOverflow.ellipsis),
                   ),
           ),
           if (hasResume) ...[
             const SizedBox(width: 12),
             Tooltip(
-              message: 'Watch from beginning (MPV)',
+              message: context.tr('Watch from beginning (MPV)'),
               child: FilledButton.tonal(
-                onPressed: () => _play(fromBeginning: true, engine: PlayEngine.mpv),
+                onPressed: () =>
+                    _play(fromBeginning: true, engine: PlayEngine.mpv),
                 style: FilledButton.styleFrom(
                   minimumSize: const Size(48, 48),
                   padding: EdgeInsets.zero,
@@ -576,7 +632,7 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
         ],
       ),
       const SizedBox(height: 4),
-      const Text(
+      const AppText(
         'SDR only — no Dolby Vision / HDR (Media3 handles those)',
         style: TextStyle(fontSize: 11, color: Colors.white54),
         textAlign: TextAlign.center,
@@ -625,9 +681,7 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
     }
     if (!mounted) return;
     await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => TmdDetailsScreen(video: video),
-      ),
+      MaterialPageRoute<void>(builder: (_) => TmdDetailsScreen(video: video)),
     );
     await _loadResume();
   }
@@ -681,7 +735,8 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
     final video = _jellyfin.videoItem(server, item);
     final meta = _service.metaFor(_identityKey);
     final videoKey = TmdStore.identityKeyFor(video);
-    final isEpisode = item.type == 'Episode' ||
+    final isEpisode =
+        item.type == 'Episode' ||
         (item.parentIndexNumber != null && item.indexNumber != null);
     if (meta != null && isEpisode && meta.movie.kind == TmdKind.tv) {
       try {
@@ -699,9 +754,7 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
     }
     if (!mounted) return;
     await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => TmdDetailsScreen(video: video),
-      ),
+      MaterialPageRoute<void>(builder: (_) => TmdDetailsScreen(video: video)),
     );
     await _loadResume();
   }
@@ -713,12 +766,31 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
     final title = (meta?.movie.title.isNotEmpty ?? false)
         ? meta!.movie.title
         : (widget.folder?.name ?? widget.video!.title);
-    final resume = _resumePosition;       // Media3 playhead
+    final resume = _resumePosition; // Media3 playhead
     final resumeMpv = _resumePositionMpv; // MPV playhead
     final hasAnyResume = resume != null || resumeMpv != null;
 
     return Scaffold(
-      appBar: AppBar(title: Text(title)),
+      appBar: AppBar(
+        title: AppText(title),
+        actions: [
+          if (widget.folder != null)
+            IconButton(
+              key: const Key('scrape-series-danmaku'),
+              tooltip: context.tr('Scrape series danmaku'),
+              icon: const Icon(Icons.subtitles_outlined),
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => DanmakuScrapeScreen(
+                    folder: widget.folder!,
+                    seriesTitle: _meta?.movie.title ?? widget.folder!.name,
+                    initialVideos: _currentDanmakuVideos(),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _buildBody(theme, meta),
@@ -743,7 +815,7 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
                                       minimumSize: const Size.fromHeight(52),
                                     ),
                                     icon: const Icon(Icons.play_arrow),
-                                    label: Text(
+                                    label: AppText(
                                       'Resume from ${_formatClock(resume)}',
                                       overflow: TextOverflow.ellipsis,
                                     ),
@@ -751,10 +823,9 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
                                 ),
                                 const SizedBox(width: 12),
                                 Tooltip(
-                                  message: 'Watch from beginning',
+                                  message: context.tr('Watch from beginning'),
                                   child: FilledButton.tonal(
-                                    onPressed: () =>
-                                        _play(fromBeginning: true),
+                                    onPressed: () => _play(fromBeginning: true),
                                     style: FilledButton.styleFrom(
                                       minimumSize: const Size(52, 52),
                                       padding: EdgeInsets.zero,
@@ -771,11 +842,10 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
                                 minimumSize: const Size.fromHeight(52),
                               ),
                               icon: const Icon(Icons.play_arrow),
-                              label: const Text('Play'),
+                              label: const AppText('Play'),
                             ),
                           ],
-                          if (showMpvOption)
-                            ..._mpvButton(resume: resumeMpv),
+                          if (showMpvOption) ..._mpvButton(resume: resumeMpv),
                         ],
                       )
                     : Column(
@@ -788,7 +858,7 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
                               minimumSize: const Size.fromHeight(52),
                             ),
                             icon: const Icon(Icons.play_arrow),
-                            label: const Text('Play'),
+                            label: const AppText('Play'),
                           ),
                           if (showMpvOption) ..._mpvButton(resume: null),
                         ],
@@ -817,9 +887,22 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
     final month = int.tryParse(parts[1]);
     final day = int.tryParse(parts[2]);
     if (year == null || month == null || day == null) return iso;
+    if (AppLocaleController.instance.isChinese) {
+      return '$year年$month月$day日';
+    }
     const months = [
-      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
     ];
     if (month < 1 || month > 12) return iso;
     return '${months[month - 1]} $day, $year';
@@ -834,11 +917,7 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
     if (MediaQuery.orientationOf(context) == Orientation.landscape) {
       final height = (size.height * 0.32).clamp(140.0, 240.0);
       return Center(
-        child: SizedBox(
-          width: height * 16 / 9,
-          height: height,
-          child: child,
-        ),
+        child: SizedBox(width: height * 16 / 9, height: height, child: child),
       );
     }
     return SizedBox(
@@ -862,9 +941,12 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
     // For a single episode, the still frame takes over the header (when the
     // show's season data is loaded) so the page reads as "this episode".
     final headerImage = singleEpisode?.stillUrl() ?? movie.backdropUrl();
+    final fallbackHeaderImage = _jellyfinInfo?.backdropUrl;
+    final fallbackPosterImage = _jellyfinInfo?.imageUrl;
     final episodeAirDate = singleEpisode?.airDate;
-    final episodeOverview =
-        (singleEpisode?.overview.isNotEmpty ?? false) ? singleEpisode!.overview : null;
+    final episodeOverview = (singleEpisode?.overview.isNotEmpty ?? false)
+        ? singleEpisode!.overview
+        : null;
 
     return CustomScrollView(
       slivers: [
@@ -880,14 +962,25 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
                         height: double.infinity,
                         fit: BoxFit.cover,
                         errorBuilder: (_, _, _) =>
-                            _artworkFallback(colorScheme),
+                            fallbackHeaderImage != null &&
+                                fallbackHeaderImage != headerImage
+                            ? Image.network(
+                                fallbackHeaderImage,
+                                width: double.infinity,
+                                height: double.infinity,
+                                fit: BoxFit.cover,
+                                errorBuilder: (_, _, _) =>
+                                    _artworkFallback(colorScheme),
+                              )
+                            : _artworkFallback(colorScheme),
                       )
                     : _artworkFallback(colorScheme),
                 Positioned(
                   bottom: 8,
                   right: 12,
                   child: _RatingBadge(
-                    rating: singleEpisode != null && singleEpisode.voteAverage > 0
+                    rating:
+                        singleEpisode != null && singleEpisode.voteAverage > 0
                         ? singleEpisode.voteAverage
                         : movie.voteAverage,
                   ),
@@ -914,7 +1007,18 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
                               height: 156,
                               fit: BoxFit.cover,
                               errorBuilder: (_, _, _) =>
-                                  _posterFallback(colorScheme),
+                                  fallbackPosterImage != null &&
+                                      fallbackPosterImage !=
+                                          movie.posterUrl(width: 342)
+                                  ? Image.network(
+                                      fallbackPosterImage,
+                                      width: 104,
+                                      height: 156,
+                                      fit: BoxFit.cover,
+                                      errorBuilder: (_, _, _) =>
+                                          _posterFallback(colorScheme),
+                                    )
+                                  : _posterFallback(colorScheme),
                             )
                           : _posterFallback(colorScheme),
                     ),
@@ -924,7 +1028,7 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           if (_parsed.isEpisode && singleEpisode != null) ...[
-                            Text(
+                            AppText(
                               movie.title,
                               style: theme.textTheme.titleLarge?.copyWith(
                                 fontWeight: FontWeight.w700,
@@ -944,22 +1048,20 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
                                     color: colorScheme.primaryContainer,
                                     borderRadius: BorderRadius.circular(4),
                                   ),
-                                  child: Text(
+                                  child: AppText(
                                     _parsed.episodeLabel,
                                     style: theme.textTheme.labelMedium
                                         ?.copyWith(
-                                      fontWeight: FontWeight.w700,
-                                      color:
-                                          colorScheme.onPrimaryContainer,
-                                    ),
+                                          fontWeight: FontWeight.w700,
+                                          color: colorScheme.onPrimaryContainer,
+                                        ),
                                   ),
                                 ),
                                 const SizedBox(width: 8),
                                 Expanded(
-                                  child: Text(
+                                  child: AppText(
                                     singleEpisode.nameLabel,
-                                    style:
-                                        theme.textTheme.titleSmall?.copyWith(
+                                    style: theme.textTheme.titleSmall?.copyWith(
                                       fontWeight: FontWeight.w600,
                                     ),
                                     maxLines: 1,
@@ -969,10 +1071,12 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
                               ],
                             ),
                             const SizedBox(height: 2),
-                            if (_meta?.seasons[_parsed.season]?.name
+                            if (_meta
+                                    ?.seasons[_parsed.season]
+                                    ?.name
                                     .isNotEmpty ??
                                 false)
-                              Text(
+                              AppText(
                                 _meta!.seasons[_parsed.season]!.name,
                                 style: theme.textTheme.bodyMedium?.copyWith(
                                   color: colorScheme.onSurfaceVariant,
@@ -980,7 +1084,7 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
                               ),
                           ] else ...[
                             if (movie.title.isNotEmpty)
-                              Text(
+                              AppText(
                                 movie.title,
                                 style: theme.textTheme.titleLarge?.copyWith(
                                   fontWeight: FontWeight.w700,
@@ -989,7 +1093,7 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
                                 overflow: TextOverflow.ellipsis,
                               ),
                             if (movie.year != null)
-                              Text(
+                              AppText(
                                 '${movie.year}',
                                 style: theme.textTheme.bodyLarge?.copyWith(
                                   color: colorScheme.onSurfaceVariant,
@@ -1004,8 +1108,7 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
                               if (singleEpisode?.runtimeMinutes != null)
                                 _FactChip(
                                   icon: Icons.schedule,
-                                  label:
-                                      '${singleEpisode!.runtimeMinutes} min',
+                                  label: '${singleEpisode!.runtimeMinutes} min',
                                 ),
                               if (episodeAirDate != null)
                                 _FactChip(
@@ -1017,8 +1120,7 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
                                   details?.runtimeMinutes != null)
                                 _FactChip(
                                   icon: Icons.schedule,
-                                  label:
-                                      '${details!.runtimeMinutes} min',
+                                  label: '${details!.runtimeMinutes} min',
                                 ),
                               if (details?.genres != null)
                                 for (final genre in details!.genres)
@@ -1026,7 +1128,7 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
                             ],
                           ),
                           const SizedBox(height: 10),
-                          Text(
+                          AppText(
                             details?.tagline ?? '',
                             style: theme.textTheme.bodyMedium?.copyWith(
                               fontStyle: FontStyle.italic,
@@ -1039,14 +1141,14 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
                   ],
                 ),
                 const SizedBox(height: 20),
-                Text(
+                AppText(
                   singleEpisode != null ? 'Episode overview' : 'Overview',
                   style: theme.textTheme.titleMedium?.copyWith(
                     fontWeight: FontWeight.w600,
                   ),
                 ),
                 const SizedBox(height: 6),
-                Text(
+                AppText(
                   episodeOverview ?? (details?.overview ?? movie.overview),
                   style: theme.textTheme.bodyMedium?.copyWith(height: 1.5),
                 ),
@@ -1072,7 +1174,8 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
                 ],
 
                 // ── Stills gallery (Nova-style, single episode only) ──
-                if (singleEpisode != null && singleEpisode.stills.isNotEmpty) ...[
+                if (singleEpisode != null &&
+                    singleEpisode.stills.isNotEmpty) ...[
                   const SizedBox(height: 20),
                   _StillsGallery(stills: singleEpisode.stillUrls()),
                 ],
@@ -1102,14 +1205,14 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
                   children: [
                     TextButton(
                       onPressed: _fixMatch,
-                      child: const Text('Fix match'),
+                      child: const AppText('Fix match'),
                     ),
                     TextButton(
                       onPressed: _removeInfo,
                       style: TextButton.styleFrom(
                         foregroundColor: theme.colorScheme.error,
                       ),
-                      child: const Text('Remove info'),
+                      child: const AppText('Remove info'),
                     ),
                   ],
                 ),
@@ -1136,7 +1239,7 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
           sliver: SliverToBoxAdapter(
             child: Row(
               children: [
-                Text(
+                AppText(
                   'Episodes',
                   style: theme.textTheme.titleMedium?.copyWith(
                     fontWeight: FontWeight.w600,
@@ -1149,7 +1252,7 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
         SliverToBoxAdapter(
           child: Padding(
             padding: const EdgeInsets.all(16),
-            child: Text(
+            child: AppText(
               _folderError ?? 'No videos or folders here',
               style: theme.textTheme.bodyMedium?.copyWith(
                 color: colorScheme.error,
@@ -1176,14 +1279,12 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
     final sortedSeasons = seasonGroups.keys.toList()..sort();
 
     Widget entryTile(FileEntry e) => _FolderEntryTile(
-          entry: e,
-          episode: _episodeFor(e),
-          tmdbMeta: _service.metaFor(
-            TmdStore.identityKeyFor(_toVideoItem(e)),
-          ),
-          resumeProgress: _resumeProgressForFile(e),
-          onTap: () => _openFolderEntry(e),
-        );
+      entry: e,
+      episode: _episodeFor(e),
+      tmdbMeta: _service.metaFor(TmdStore.identityKeyFor(_toVideoItem(e))),
+      resumeProgress: _resumeProgressForFile(e),
+      onTap: () => _openFolderEntry(e),
+    );
 
     return [
       SliverPadding(
@@ -1191,14 +1292,14 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
         sliver: SliverToBoxAdapter(
           child: Row(
             children: [
-              Text(
+              AppText(
                 'Episodes',
                 style: theme.textTheme.titleMedium?.copyWith(
                   fontWeight: FontWeight.w600,
                 ),
               ),
               const Spacer(),
-              Text(
+              AppText(
                 _fileCountLabel(),
                 style: theme.textTheme.bodySmall?.copyWith(
                   color: colorScheme.onSurfaceVariant,
@@ -1210,18 +1311,15 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
       ),
       if (folders.isNotEmpty)
         SliverList(
-          delegate: SliverChildBuilderDelegate(
-            (context, index) {
-              final entry = folders[index];
-              return _FolderEntryTile(
-                entry: entry,
-                episode: null,
-                tmdbMeta: null,
-                onTap: () => _openFolderEntry(entry),
-              );
-            },
-            childCount: folders.length,
-          ),
+          delegate: SliverChildBuilderDelegate((context, index) {
+            final entry = folders[index];
+            return _FolderEntryTile(
+              entry: entry,
+              episode: null,
+              tmdbMeta: null,
+              onTap: () => _openFolderEntry(entry),
+            );
+          }, childCount: folders.length),
         ),
       for (final s in sortedSeasons)
         SliverToBoxAdapter(
@@ -1266,7 +1364,7 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
           sliver: SliverToBoxAdapter(
             child: Row(
               children: [
-                Text(
+                AppText(
                   'Episodes',
                   style: theme.textTheme.titleMedium?.copyWith(
                     fontWeight: FontWeight.w600,
@@ -1279,7 +1377,7 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
         SliverToBoxAdapter(
           child: Padding(
             padding: const EdgeInsets.all(16),
-            child: Text(
+            child: AppText(
               _folderError ?? 'No videos or folders here',
               style: theme.textTheme.bodyMedium?.copyWith(
                 color: colorScheme.error,
@@ -1326,14 +1424,14 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
         sliver: SliverToBoxAdapter(
           child: Row(
             children: [
-              Text(
+              AppText(
                 'Episodes',
                 style: theme.textTheme.titleMedium?.copyWith(
                   fontWeight: FontWeight.w600,
                 ),
               ),
               const Spacer(),
-              Text(
+              AppText(
                 _jellyfinFileCountLabel(),
                 style: theme.textTheme.bodySmall?.copyWith(
                   color: colorScheme.onSurfaceVariant,
@@ -1345,18 +1443,15 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
       ),
       if (folders.isNotEmpty)
         SliverList(
-          delegate: SliverChildBuilderDelegate(
-            (context, index) {
-              final item = folders[index];
-              return _JellyfinEntryTile(
-                item: item,
-                episode: null,
-                tmdbMeta: null,
-                onTap: () => _openJellyfinItem(item),
-              );
-            },
-            childCount: folders.length,
-          ),
+          delegate: SliverChildBuilderDelegate((context, index) {
+            final item = folders[index];
+            return _JellyfinEntryTile(
+              item: item,
+              episode: null,
+              tmdbMeta: null,
+              onTap: () => _openJellyfinItem(item),
+            );
+          }, childCount: folders.length),
         ),
       for (final s in sortedSeasons)
         SliverToBoxAdapter(
@@ -1419,12 +1514,11 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
                     Image.network(
                       info.backdropUrl!,
                       fit: BoxFit.cover,
-                      errorBuilder: (_, _, _) =>
-                          _artworkFallback(colorScheme),
+                      errorBuilder: (_, _, _) => _artworkFallback(colorScheme),
                       loadingBuilder: (context, child, progress) =>
                           progress == null
-                              ? child
-                              : _artworkFallback(colorScheme),
+                          ? child
+                          : _artworkFallback(colorScheme),
                     )
                   else
                     _artworkFallback(colorScheme),
@@ -1465,14 +1559,14 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(
+                            AppText(
                               info.name,
                               style: theme.textTheme.titleMedium?.copyWith(
                                 fontWeight: FontWeight.w700,
                               ),
                             ),
                             if (info.year != null)
-                              Text(
+                              AppText(
                                 '${info.year}',
                                 style: theme.textTheme.bodyLarge?.copyWith(
                                   color: colorScheme.onSurfaceVariant,
@@ -1501,14 +1595,14 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
                   ),
                   if (info.overview.isNotEmpty) ...[
                     const SizedBox(height: 20),
-                    Text(
+                    AppText(
                       'Overview',
                       style: theme.textTheme.titleMedium?.copyWith(
                         fontWeight: FontWeight.w600,
                       ),
                     ),
                     const SizedBox(height: 6),
-                    Text(
+                    AppText(
                       info.overview,
                       style: theme.textTheme.bodyMedium?.copyWith(height: 1.5),
                     ),
@@ -1519,7 +1613,7 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
                       const Spacer(),
                       TextButton(
                         onPressed: _fixMatch,
-                        child: const Text('Find on TMDB'),
+                        child: const AppText('Find on TMDB'),
                       ),
                     ],
                   ),
@@ -1535,7 +1629,7 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
               child: Row(
                 children: [
                   Expanded(
-                    child: Text(
+                    child: AppText(
                       '"${widget.folder!.name}"',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
@@ -1546,7 +1640,7 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
                   ),
                   TextButton(
                     onPressed: _fixMatch,
-                    child: const Text('Find on TMDB'),
+                    child: const AppText('Find on TMDB'),
                   ),
                 ],
               ),
@@ -1572,13 +1666,13 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
               color: colorScheme.onSurfaceVariant.withValues(alpha: 0.6),
             ),
             const SizedBox(height: 16),
-            Text(
+            AppText(
               fileName,
               textAlign: TextAlign.center,
               style: theme.textTheme.titleMedium,
             ),
             const SizedBox(height: 8),
-            Text(
+            AppText(
               'No metadata loaded',
               textAlign: TextAlign.center,
               style: theme.textTheme.bodyMedium?.copyWith(
@@ -1589,7 +1683,7 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
             FilledButton.icon(
               onPressed: _fixMatch,
               icon: const Icon(Icons.info_outline),
-              label: const Text('Get Info'),
+              label: const AppText('Get Info'),
             ),
           ],
         ),
@@ -1603,10 +1697,7 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
         gradient: LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [
-            colorScheme.primaryContainer,
-            colorScheme.tertiaryContainer,
-          ],
+          colors: [colorScheme.primaryContainer, colorScheme.tertiaryContainer],
         ),
       ),
       child: const Center(
@@ -1648,7 +1739,7 @@ class _RatingBadge extends StatelessWidget {
         children: [
           const Icon(Icons.star, size: 14, color: Colors.amber),
           const SizedBox(width: 4),
-          Text(
+          AppText(
             rating.toStringAsFixed(1),
             style: TextStyle(
               color: colorScheme.onSurface,
@@ -1684,7 +1775,7 @@ class _FactChip extends StatelessWidget {
             Icon(icon, size: 14, color: colorScheme.onSurfaceVariant),
             const SizedBox(width: 4),
           ],
-          Text(
+          AppText(
             label,
             style: TextStyle(
               fontSize: 12,
@@ -1725,9 +1816,10 @@ class _FileInfoCard extends StatelessWidget {
     }
 
     // Video codec + resolution
-    final videoInfo = [videoCodec, resolution]
-        .where((s) => s != null && s.isNotEmpty)
-        .join('  ·  ');
+    final videoInfo = [
+      videoCodec,
+      resolution,
+    ].where((s) => s != null && s.isNotEmpty).join('  ·  ');
     if (videoInfo.isNotEmpty) {
       rows.add(_InfoRow(icon: Icons.videocam, label: videoInfo));
     }
@@ -1744,10 +1836,9 @@ class _FileInfoCard extends StatelessWidget {
 
     // File size
     if (sizeBytes != null && sizeBytes > 0) {
-      rows.add(_InfoRow(
-        icon: Icons.storage,
-        label: _formatFileSize(sizeBytes),
-      ));
+      rows.add(
+        _InfoRow(icon: Icons.storage, label: _formatFileSize(sizeBytes)),
+      );
     }
 
     if (rows.isEmpty) return const SizedBox.shrink();
@@ -1758,7 +1849,7 @@ class _FileInfoCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
+            AppText(
               'File info',
               style: theme.textTheme.titleMedium?.copyWith(
                 fontWeight: FontWeight.w600,
@@ -1768,7 +1859,7 @@ class _FileInfoCard extends StatelessWidget {
             ...rows,
             if (path.isNotEmpty) ...[
               const SizedBox(height: 8),
-              Text(
+              AppText(
                 path,
                 style: theme.textTheme.bodySmall?.copyWith(
                   color: colorScheme.onSurfaceVariant,
@@ -1802,26 +1893,11 @@ class _HdrBadge extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final (color, icon) = switch (format) {
-      HdrFormat.dolbyVision => (
-          const Color(0xFF6B2FA0),
-          Icons.movie,
-        ),
-      HdrFormat.hdr10plus => (
-          const Color(0xFFE6A817),
-          Icons.brightness_high,
-        ),
-      HdrFormat.hdr10 => (
-          const Color(0xFFE6A817),
-          Icons.brightness_high,
-        ),
-      HdrFormat.hlg => (
-          const Color(0xFF4CAF50),
-          Icons.wb_sunny,
-        ),
-      HdrFormat.sdr => (
-          theme.colorScheme.surfaceContainerHighest,
-          Icons.tv,
-        ),
+      HdrFormat.dolbyVision => (const Color(0xFF6B2FA0), Icons.movie),
+      HdrFormat.hdr10plus => (const Color(0xFFE6A817), Icons.brightness_high),
+      HdrFormat.hdr10 => (const Color(0xFFE6A817), Icons.brightness_high),
+      HdrFormat.hlg => (const Color(0xFF4CAF50), Icons.wb_sunny),
+      HdrFormat.sdr => (theme.colorScheme.surfaceContainerHighest, Icons.tv),
     };
 
     return Container(
@@ -1836,7 +1912,7 @@ class _HdrBadge extends StatelessWidget {
         children: [
           Icon(icon, size: 16, color: color),
           const SizedBox(width: 6),
-          Text(
+          AppText(
             format.label,
             style: theme.textTheme.labelLarge?.copyWith(
               color: color,
@@ -1863,7 +1939,7 @@ class _SubtitlesCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
+            AppText(
               'Subtitles',
               style: theme.textTheme.titleMedium?.copyWith(
                 fontWeight: FontWeight.w600,
@@ -1873,8 +1949,8 @@ class _SubtitlesCard extends StatelessWidget {
             ListTile(
               contentPadding: EdgeInsets.zero,
               leading: const Icon(Icons.subtitles),
-              title: const Text('Search subtitles online'),
-              subtitle: const Text('OpenSubtitles'),
+              title: const AppText('Search subtitles online'),
+              subtitle: const AppText('OpenSubtitles'),
               trailing: const Icon(Icons.chevron_right),
               onTap: () => _openSubtitleSearch(context),
             ),
@@ -1912,7 +1988,7 @@ class _TrailersCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
+            AppText(
               'Trailers',
               style: theme.textTheme.titleMedium?.copyWith(
                 fontWeight: FontWeight.w600,
@@ -1922,9 +1998,12 @@ class _TrailersCard extends StatelessWidget {
             for (final trailer in trailers)
               ListTile(
                 contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.play_circle_outline, color: Colors.red),
-                title: Text(trailer.name),
-                subtitle: const Text('YouTube'),
+                leading: const Icon(
+                  Icons.play_circle_outline,
+                  color: Colors.red,
+                ),
+                title: AppText(trailer.name),
+                subtitle: const AppText('YouTube'),
                 trailing: const Icon(Icons.open_in_new, size: 18),
                 onTap: () => _launchTrailer(context, trailer),
               ),
@@ -1957,7 +2036,7 @@ class _CastRow extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
+        AppText(
           title,
           style: theme.textTheme.titleMedium?.copyWith(
             fontWeight: FontWeight.w600,
@@ -1985,12 +2064,14 @@ class _CastRow extends StatelessWidget {
                               height: 72,
                               fit: BoxFit.cover,
                               errorBuilder: (_, _, _) => _avatarFallback(
-                                  theme.colorScheme, member.name),
+                                theme.colorScheme,
+                                member.name,
+                              ),
                             )
                           : _avatarFallback(theme.colorScheme, member.name),
                     ),
                     const SizedBox(height: 6),
-                    Text(
+                    AppText(
                       member.name,
                       style: theme.textTheme.bodySmall?.copyWith(
                         fontWeight: FontWeight.w600,
@@ -2001,7 +2082,7 @@ class _CastRow extends StatelessWidget {
                     ),
                     if (member.character != null &&
                         member.character!.isNotEmpty)
-                      Text(
+                      AppText(
                         member.character!,
                         style: theme.textTheme.bodySmall?.copyWith(
                           color: theme.colorScheme.onSurfaceVariant,
@@ -2022,14 +2103,13 @@ class _CastRow extends StatelessWidget {
   }
 
   static Widget _avatarFallback(ColorScheme colorScheme, String name) {
-    final initial =
-        name.isNotEmpty ? name[0].toUpperCase() : '?';
+    final initial = name.isNotEmpty ? name[0].toUpperCase() : '?';
     return Container(
       width: 72,
       height: 72,
       color: colorScheme.surfaceContainerHighest,
       child: Center(
-        child: Text(
+        child: AppText(
           initial,
           style: TextStyle(
             fontSize: 28,
@@ -2053,7 +2133,7 @@ class _StillsGallery extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
+        AppText(
           'Stills',
           style: theme.textTheme.titleMedium?.copyWith(
             fontWeight: FontWeight.w600,
@@ -2105,10 +2185,14 @@ class _InfoRow extends StatelessWidget {
       padding: const EdgeInsets.symmetric(vertical: 3),
       child: Row(
         children: [
-          Icon(icon, size: 18, color: Theme.of(context).colorScheme.onSurfaceVariant),
+          Icon(
+            icon,
+            size: 18,
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
           const SizedBox(width: 8),
           Expanded(
-            child: Text(
+            child: AppText(
               label,
               style: Theme.of(context).textTheme.bodyMedium,
             ),
@@ -2163,7 +2247,7 @@ class _SeasonExpansion<T> extends StatelessWidget {
         title: Row(
           children: [
             Flexible(
-              child: Text(
+              child: AppText(
                 headerLabel,
                 style: TextStyle(
                   color: colorScheme.primary,
@@ -2175,9 +2259,14 @@ class _SeasonExpansion<T> extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 10),
-            SeasonProgressRing(watched: watched, total: total, size: 28, strokeWidth: 2.5),
+            SeasonProgressRing(
+              watched: watched,
+              total: total,
+              size: 28,
+              strokeWidth: 2.5,
+            ),
             const SizedBox(width: 6),
-            Text(
+            AppText(
               sg.watchedBadge(watched, total),
               style: TextStyle(
                 color: colorScheme.onSurfaceVariant,
@@ -2227,7 +2316,11 @@ class _FolderEntryTile extends StatelessWidget {
     if (entry.isDirectory) {
       return TvTile(
         leading: Icon(Icons.folder, color: colorScheme.primary),
-        title: Text(entry.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+        title: AppText(
+          entry.name,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
         trailing: const Icon(Icons.chevron_right),
         onTap: onTap,
       );
@@ -2252,14 +2345,14 @@ class _FolderEntryTile extends StatelessWidget {
             children: [
               // Show episode name on its own line when available (Nova-style).
               if (episode != null && episode!.name.isNotEmpty)
-                Text(
+                AppText(
                   episode!.name,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.bodyMedium,
                 ),
               if (subtitle.isNotEmpty)
-                Text(subtitle, maxLines: 2, overflow: TextOverflow.ellipsis),
+                AppText(subtitle, maxLines: 2, overflow: TextOverflow.ellipsis),
               if (resumeProgress != null)
                 Padding(
                   padding: const EdgeInsets.only(top: 4),
@@ -2269,7 +2362,9 @@ class _FolderEntryTile extends StatelessWidget {
                       value: resumeProgress,
                       minHeight: 2,
                       backgroundColor: colorScheme.surfaceContainerHighest,
-                      valueColor: AlwaysStoppedAnimation<Color>(colorScheme.primary),
+                      valueColor: AlwaysStoppedAnimation<Color>(
+                        colorScheme.primary,
+                      ),
                     ),
                   ),
                 ),
@@ -2280,10 +2375,12 @@ class _FolderEntryTile extends StatelessWidget {
       leading: posterUrl != null
           ? _Poster(posterUrl: posterUrl)
           : Icon(
-              parsed.isEpisode ? Icons.movie_outlined : Icons.play_circle_outline,
+              parsed.isEpisode
+                  ? Icons.movie_outlined
+                  : Icons.play_circle_outline,
               color: colorScheme.secondary,
             ),
-      title: Text(entry.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+      title: AppText(entry.name, maxLines: 1, overflow: TextOverflow.ellipsis),
       subtitle: subtitleWidget,
       onTap: onTap,
     );
@@ -2312,7 +2409,7 @@ class _JellyfinEntryTile extends StatelessWidget {
     if (item.isFolder) {
       return TvTile(
         leading: Icon(Icons.folder, color: colorScheme.primary),
-        title: Text(item.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+        title: AppText(item.name, maxLines: 1, overflow: TextOverflow.ellipsis),
         trailing: const Icon(Icons.chevron_right),
         onTap: onTap,
       );
@@ -2336,14 +2433,14 @@ class _JellyfinEntryTile extends StatelessWidget {
             children: [
               // Show episode name on its own line when available (Nova-style).
               if (episode != null && episode!.name.isNotEmpty)
-                Text(
+                AppText(
                   episode!.name,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.bodyMedium,
                 ),
               if (subtitle.isNotEmpty)
-                Text(subtitle, maxLines: 2, overflow: TextOverflow.ellipsis),
+                AppText(subtitle, maxLines: 2, overflow: TextOverflow.ellipsis),
               if (resumeProgress != null)
                 Padding(
                   padding: const EdgeInsets.only(top: 4),
@@ -2353,7 +2450,9 @@ class _JellyfinEntryTile extends StatelessWidget {
                       value: resumeProgress,
                       minHeight: 2,
                       backgroundColor: colorScheme.surfaceContainerHighest,
-                      valueColor: AlwaysStoppedAnimation<Color>(colorScheme.primary),
+                      valueColor: AlwaysStoppedAnimation<Color>(
+                        colorScheme.primary,
+                      ),
                     ),
                   ),
                 ),
@@ -2369,7 +2468,7 @@ class _JellyfinEntryTile extends StatelessWidget {
                   : Icons.play_circle_outline,
               color: colorScheme.secondary,
             ),
-      title: Text(item.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+      title: AppText(item.name, maxLines: 1, overflow: TextOverflow.ellipsis),
       subtitle: subtitleWidget,
       onTap: onTap,
     );
@@ -2488,7 +2587,7 @@ class _SearchDialogState extends State<_SearchDialog> {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
     return AlertDialog(
-      title: const Text('Get Info'),
+      title: const AppText('Get Info'),
       content: SizedBox(
         width: 420,
         child: Column(
@@ -2498,17 +2597,17 @@ class _SearchDialogState extends State<_SearchDialog> {
               controller: _controller,
               autofocus: true,
               onSubmitted: (_) => _search(),
-              decoration: const InputDecoration(
-                hintText: 'Search title',
-                prefixIcon: Icon(Icons.search),
+              decoration: InputDecoration(
+                hintText: context.tr('Search title'),
+                prefixIcon: const Icon(Icons.search),
               ),
             ),
             const SizedBox(height: 8),
             // Kind toggle: TV or Movie
             SegmentedButton<TmdKind>(
               segments: const [
-                ButtonSegment(value: TmdKind.tv, label: Text('TV Series')),
-                ButtonSegment(value: TmdKind.movie, label: Text('Movie')),
+                ButtonSegment(value: TmdKind.tv, label: AppText('TV Series')),
+                ButtonSegment(value: TmdKind.movie, label: AppText('Movie')),
               ],
               selected: {_kind},
               onSelectionChanged: (sel) => setState(() => _kind = sel.first),
@@ -2522,7 +2621,7 @@ class _SearchDialogState extends State<_SearchDialog> {
             else if (_noKey)
               Padding(
                 padding: const EdgeInsets.all(16),
-                child: Text(
+                child: AppText(
                   'Search is unavailable right now. Try again in a moment.',
                   textAlign: TextAlign.center,
                   style: TextStyle(color: colorScheme.onSurfaceVariant),
@@ -2531,7 +2630,7 @@ class _SearchDialogState extends State<_SearchDialog> {
             else if (_error != null)
               Padding(
                 padding: const EdgeInsets.all(16),
-                child: Text(
+                child: AppText(
                   'Search failed. Try again in a moment.',
                   textAlign: TextAlign.center,
                   style: TextStyle(color: colorScheme.error),
@@ -2541,7 +2640,7 @@ class _SearchDialogState extends State<_SearchDialog> {
               if (_results!.isEmpty)
                 const Padding(
                   padding: EdgeInsets.all(16),
-                  child: Text('No results. Try a different title.'),
+                  child: AppText('No results. Try a different title.'),
                 )
               else
                 Flexible(
@@ -2561,8 +2660,8 @@ class _SearchDialogState extends State<_SearchDialog> {
                                     const Icon(Icons.movie),
                               )
                             : const Icon(Icons.movie),
-                        title: Text(movie.title),
-                        subtitle: Text(
+                        title: AppText(movie.title),
+                        subtitle: AppText(
                           [
                             if (movie.kind == TmdKind.tv) 'TV Series',
                             if (movie.year != null) '${movie.year}',
@@ -2581,7 +2680,7 @@ class _SearchDialogState extends State<_SearchDialog> {
       actions: [
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
+          child: const AppText('Cancel'),
         ),
       ],
     );

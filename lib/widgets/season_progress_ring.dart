@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../l10n/app_localizations.dart';
+
 /// Circular progress indicator showing watched/total (e.g. 3/10).
 ///
 /// Uses a [Stack] + [CircularProgressIndicator] with a text overlay,
@@ -37,7 +39,7 @@ class SeasonProgressRing extends StatelessWidget {
             backgroundColor: colorScheme.surfaceContainerHighest,
             valueColor: AlwaysStoppedAnimation<Color>(colorScheme.primary),
           ),
-          Text(
+          AppText(
             label,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,

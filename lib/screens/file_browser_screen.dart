@@ -8,6 +8,7 @@ import '../utils/file_info_extractor.dart';
 import '../widgets/tv_overscan.dart';
 import '../widgets/tv_tile.dart';
 import 'tmd_details_screen.dart';
+import '../l10n/app_localizations.dart';
 
 /// In-app file browser (CX-Explorer style): browse the device's storage and
 /// play any video without importing it into the library.
@@ -195,19 +196,19 @@ class _FileBrowserScreenState extends State<FileBrowserScreen>
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Remove folder?'),
-        content: Text(
+        title: const AppText('Remove folder?'),
+        content: AppText(
           '"${entry.name}" will no longer appear here. You can add it again '
           'anytime.',
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Cancel'),
+            child: const AppText('Cancel'),
           ),
           FilledButton(
             onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Remove'),
+            child: const AppText('Remove'),
           ),
         ],
       ),
@@ -238,11 +239,13 @@ class _FileBrowserScreenState extends State<FileBrowserScreen>
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(_atRoot
-            ? 'Browse files'
-            : (_currentPath?.split('/').lastOrNull ?? 'Files')),
+        title: AppText(
+          _atRoot
+              ? 'Browse files'
+              : (_currentPath?.split('/').lastOrNull ?? 'Files'),
+        ),
         leading: IconButton(
-          tooltip: 'Up',
+          tooltip: context.tr('Up'),
           icon: const Icon(Icons.arrow_back),
           onPressed: _goUp,
         ),
@@ -255,8 +258,10 @@ class _FileBrowserScreenState extends State<FileBrowserScreen>
     if (_loading) return const Center(child: CircularProgressIndicator());
     if (_error != null) {
       return Center(
-        child: Text('Error: $_error',
-            style: TextStyle(color: Theme.of(context).colorScheme.error)),
+        child: AppText(
+          'Error: $_error',
+          style: TextStyle(color: Theme.of(context).colorScheme.error),
+        ),
       );
     }
     if (!_hasAccess) {
@@ -268,7 +273,7 @@ class _FileBrowserScreenState extends State<FileBrowserScreen>
             children: [
               const Icon(Icons.folder_off_outlined, size: 64),
               const SizedBox(height: 16),
-              Text(
+              AppText(
                 'All files access is needed to browse your storage',
                 textAlign: TextAlign.center,
                 style: Theme.of(context).textTheme.titleMedium,
@@ -276,7 +281,7 @@ class _FileBrowserScreenState extends State<FileBrowserScreen>
               const SizedBox(height: 16),
               FilledButton(
                 onPressed: _grantAccess,
-                child: const Text('Grant access'),
+                child: const AppText('Grant access'),
               ),
             ],
           ),
@@ -284,7 +289,7 @@ class _FileBrowserScreenState extends State<FileBrowserScreen>
       );
     }
     if (_entries.isEmpty) {
-      return const Center(child: Text('No videos or folders here'));
+      return const Center(child: AppText('No videos or folders here'));
     }
     final items = <Widget>[
       for (final entry in _entries)
@@ -355,31 +360,25 @@ class _FileTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final icon = entry.isDirectory
-        ? Icons.folder
-        : Icons.play_circle_outline;
-    final color = entry.isDirectory ? colorScheme.primary : colorScheme.secondary;
+    final icon = entry.isDirectory ? Icons.folder : Icons.play_circle_outline;
+    final color = entry.isDirectory
+        ? colorScheme.primary
+        : colorScheme.secondary;
     final subtitle = entry.isDirectory ? null : _sizeLabel(entry.size);
     final posterUrl = posterUrlOf(tmdbMeta);
     return TvTile(
       leading: posterUrl != null
           ? _Poster(posterUrl: posterUrl)
           : Icon(icon, color: color),
-      title: Text(
-        entry.name,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-      ),
-      subtitle: subtitle == null ? null : Text(subtitle),
+      title: AppText(entry.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+      subtitle: subtitle == null ? null : AppText(subtitle),
       trailing: onRemove != null
           ? IconButton(
               icon: const Icon(Icons.delete_outline),
-              tooltip: 'Remove folder',
+              tooltip: context.tr('Remove folder'),
               onPressed: onRemove,
             )
-          : (entry.isDirectory
-              ? const Icon(Icons.chevron_right)
-              : null),
+          : (entry.isDirectory ? const Icon(Icons.chevron_right) : null),
       onTap: onTap,
     );
   }
