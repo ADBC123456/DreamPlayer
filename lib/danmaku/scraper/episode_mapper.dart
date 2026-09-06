@@ -90,13 +90,13 @@ class DanmakuEpisodeParser {
 
   /// `S01E02`, `s1e2` — season + episode.
   static final RegExp _seasonEpisode = RegExp(
-    r'S(\d{1,2})\s*[Eº]\s*(\d{1,3})',
+    r'S(\d{1,2})\s*[Eº]\s*(\d{1,4})',
     caseSensitive: false,
   );
 
   /// `1x02` — season x episode (Jellyfin/Plex style).
   static final RegExp _seasonEpisodeX = RegExp(
-    r'\b(\d{1,2})x(\d{1,3})\b',
+    r'\b(\d{1,2})x(\d{1,4})\b',
     caseSensitive: false,
   );
 

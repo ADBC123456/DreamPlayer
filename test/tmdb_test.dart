@@ -44,6 +44,25 @@ void main() {
       expect(parsed.seasonEpisodeLabel, 'Season 2 · Episode 4');
     });
 
+    test('supports three and four digit episode numbers', () {
+      final threeDigits = ParsedFileName.parse(
+        'S01E146.2020.2160p.WEB-DL.H.264.AAC.mp4',
+        parentFolderName: '凡人修仙传',
+      );
+      expect(threeDigits.isEpisode, isTrue);
+      expect(threeDigits.seriesName, '凡人修仙传');
+      expect(threeDigits.season, 1);
+      expect(threeDigits.episode, 146);
+      expect(threeDigits.episodeLabel, 'S01E146');
+
+      final fourDigits = ParsedFileName.parse('Long.Show.S02E1024.mkv');
+      expect(fourDigits.isEpisode, isTrue);
+      expect(fourDigits.seriesName, 'Long Show');
+      expect(fourDigits.season, 2);
+      expect(fourDigits.episode, 1024);
+      expect(fourDigits.episodeLabel, 'S02E1024');
+    });
+
     test('parses the short season x episode pattern too', () {
       final parsed = ParsedFileName.parse('Stranger.Things.1x03.mkv');
       expect(parsed.isEpisode, isTrue);

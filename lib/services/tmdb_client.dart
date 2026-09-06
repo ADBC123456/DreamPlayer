@@ -605,11 +605,11 @@ class ParsedFileName {
 
   static final RegExp _yearPattern = RegExp(r'\b(18|19|20)\d{2}\b');
   static final RegExp _episodePattern = RegExp(
-    r'\bS(\d{1,2})E(\d{1,2})\b',
+    r'\bS(\d{1,2})E(\d{1,4})\b',
     caseSensitive: false,
   );
   static final RegExp _episodeShortPattern = RegExp(
-    r'\b(\d{1,2})x(\d{1,3})\b',
+    r'\b(\d{1,2})x(\d{1,4})\b',
     caseSensitive: false,
   );
 
@@ -795,7 +795,7 @@ class ParsedFileName {
     // (`Episode01.mkv`, `01.mkv`) or has no searchable title, fall back to
     // the parent folder's name as the series name.
     String? effectiveSeriesName = seriesName;
-    if (effectiveSeriesName == null &&
+    if ((effectiveSeriesName == null || effectiveSeriesName.isEmpty) &&
         parentFolderName != null &&
         parentFolderName.isNotEmpty &&
         !_hasEpisodePattern(parentFolderName)) {
