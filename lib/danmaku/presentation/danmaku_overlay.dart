@@ -88,7 +88,9 @@ class DanmakuOverlayState extends State<DanmakuOverlay> {
 
   void _onClockEvent(DanmakuClockSnapshot snapshot) {
     if (!mounted) return;
-    setState(() => _clock = snapshot);
+    // The engine updates the canvas directly. Clock events do not change this
+    // widget's layout; rebuilding here repeats track/text layout every 250 ms.
+    _clock = snapshot;
     _engine?.updateClock(snapshot);
   }
 

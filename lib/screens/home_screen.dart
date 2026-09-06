@@ -54,7 +54,6 @@ class _HomeScreenState extends State<HomeScreen>
   Timer? _librarySearchDebounce;
   String _librarySearch = '';
   MediaTitleKind? _libraryKind;
-  bool _showUnorganized = false;
 
   /// "Continue watching": videos with a saved resume position, most recently
   /// played first (persisted via [ContinueWatchingStore]).
@@ -626,7 +625,6 @@ class _HomeScreenState extends State<HomeScreen>
         librarySnapshot.titles.values
             .where(
               (title) =>
-                  !_showUnorganized &&
                   (_libraryKind == null || title.kind == _libraryKind) &&
                   _matchesLibrarySearch(librarySnapshot, title, _librarySearch),
             )
@@ -636,25 +634,6 @@ class _HomeScreenState extends State<HomeScreen>
             final bNewest = _newestDiscoveryForTitle(librarySnapshot, b.id);
             return bNewest.compareTo(aNewest);
           });
-    final unorganizedFiles =
-        librarySnapshot.files.values
-            .where(
-              (file) =>
-                  file.availability != MediaAvailability.missing &&
-                  (file.titleId == null ||
-                      file.identificationState != MetadataState.matched) &&
-                  (_librarySearch.isEmpty ||
-                      file.originalFileName.toLowerCase().contains(
-                        _librarySearch.toLowerCase(),
-                      )),
-            )
-            .toList()
-          ..sort(
-            (a, b) => (b.discoveredAt ?? DateTime.fromMillisecondsSinceEpoch(0))
-                .compareTo(
-                  a.discoveredAt ?? DateTime.fromMillisecondsSinceEpoch(0),
-                ),
-          );
     final activeScans = _unifiedLibrary.progressByRoot.values
         .where(
           (progress) =>
@@ -710,9 +689,8 @@ class _HomeScreenState extends State<HomeScreen>
                   children: [
                     ChoiceChip(
                       label: const AppText('全部'),
-                      selected: !_showUnorganized && _libraryKind == null,
+                      selected: _libraryKind == null,
                       onSelected: (_) => setState(() {
-                        _showUnorganized = false;
                         _libraryKind = null;
                       }),
                     ),
@@ -720,7 +698,6 @@ class _HomeScreenState extends State<HomeScreen>
                       label: const AppText('电影'),
                       selected: _libraryKind == MediaTitleKind.movie,
                       onSelected: (_) => setState(() {
-                        _showUnorganized = false;
                         _libraryKind = MediaTitleKind.movie;
                       }),
                     ),
@@ -728,16 +705,7 @@ class _HomeScreenState extends State<HomeScreen>
                       label: const AppText('电视剧'),
                       selected: _libraryKind == MediaTitleKind.tv,
                       onSelected: (_) => setState(() {
-                        _showUnorganized = false;
                         _libraryKind = MediaTitleKind.tv;
-                      }),
-                    ),
-                    ChoiceChip(
-                      label: AppText('待整理 (${unorganizedFiles.length})'),
-                      selected: _showUnorganized,
-                      onSelected: (_) => setState(() {
-                        _showUnorganized = true;
-                        _libraryKind = null;
                       }),
                     ),
                   ],
@@ -836,30 +804,6 @@ class _HomeScreenState extends State<HomeScreen>
                 },
               ),
             ],
-            if (_showUnorganized)
-              unorganizedFiles.isEmpty
-                  ? const SliverToBoxAdapter(
-                      child: Padding(
-                        padding: EdgeInsets.all(24),
-                        child: Center(child: AppText('没有待整理的文件')),
-                      ),
-                    )
-                  : SliverList.builder(
-                      itemCount: unorganizedFiles.length,
-                      itemBuilder: (context, index) {
-                        final file = unorganizedFiles[index];
-                        return ListTile(
-                          minVerticalPadding: 12,
-                          leading: const Icon(Icons.video_file_outlined),
-                          title: AppText(file.originalFileName),
-                          subtitle: AppText(
-                            '${file.sourceRef.sourceType.toUpperCase()} · ${_identificationLabel(file.identificationState)}',
-                          ),
-                          trailing: const Icon(Icons.play_arrow),
-                          onTap: () => _playIndexedFile(file),
-                        );
-                      },
-                    ),
             // Source bookmarks remain available for direct file browsing.
             if (_folders.isEmpty)
               SliverToBoxAdapter(
@@ -931,21 +875,6 @@ class _HomeScreenState extends State<HomeScreen>
         child: const Icon(Icons.add),
       ),
     );
-  }
-
-  Future<void> _playIndexedFile(MediaFile file) async {
-    try {
-      final video = await _unifiedLibrary.resolvePlayable(file);
-      if (!mounted) return;
-      await Navigator.of(context).push(
-        MaterialPageRoute<void>(builder: (_) => PlayerScreen(video: video)),
-      );
-    } catch (error) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: AppText('无法打开此文件：$error')));
-    }
   }
 
   Future<void> _retryFailedScans(List<ScanProgress> failed) async {
@@ -1404,13 +1333,3 @@ class _GroupedContinueWatching {
     return continueLabel;
   }
 }
-
-String _identificationLabel(MetadataState state) => switch (state) {
-  MetadataState.noApiKey => '未配置 TMDB',
-  MetadataState.offline => '元数据服务不可达',
-  MetadataState.noMatch => '未找到匹配',
-  MetadataState.needsReview => '需要确认',
-  MetadataState.failed => '识别失败',
-  MetadataState.unresolved => '等待识别',
-  MetadataState.matched => '已识别',
-};

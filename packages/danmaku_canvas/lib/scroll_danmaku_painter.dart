@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'dart:ui' as ui;
 import 'models/danmaku_item.dart';
 import 'utils/utils.dart';
 import 'danmaku_timeline.dart';
@@ -16,6 +15,7 @@ class ScrollDanmakuPainter extends CustomPainter {
   final bool running;
   final int tick;
   final int batchThreshold;
+  final int Function()? readTick;
 
   final Paint selfSendPaint = Paint()
     ..style = PaintingStyle.stroke
@@ -33,97 +33,54 @@ class ScrollDanmakuPainter extends CustomPainter {
     this.danmakuHeight,
     this.running,
     this.tick, {
-    this.batchThreshold = 10, // 默认值为10，可以自行调整
-  });
+    this.batchThreshold = 10,
+    this.readTick,
+    Listenable? repaint,
+  }) : super(repaint: repaint);
 
   @override
   void paint(Canvas canvas, Size size) {
     final startPosition = size.width;
 
-    if (scrollDanmakuItems.length > batchThreshold) {
-      // 弹幕数量超过阈值时使用批量绘制
-      final ui.PictureRecorder pictureRecorder = ui.PictureRecorder();
-      final Canvas pictureCanvas = Canvas(pictureRecorder);
+    final frameTick = readTick?.call() ?? tick;
+    // CustomPaint already records a display list. A nested PictureRecorder on
+    // every dense frame adds allocation/recording work without batching glyphs.
+    for (var item in scrollDanmakuItems) {
+      item.lastDrawTick ??= item.creationTime;
+      item.xPosition = CanvasDanmakuTimeline.advanceScrollX(
+        currentX: item.xPosition,
+        previousTick: item.lastDrawTick!,
+        currentTick: frameTick,
+        viewWidth: startPosition,
+        danmakuWidth: item.width,
+        durationSeconds: danmakuDurationInSeconds,
+        playbackRate: playbackRate,
+      );
 
-      for (var item in scrollDanmakuItems) {
-        item.lastDrawTick ??= item.creationTime;
-        item.xPosition = CanvasDanmakuTimeline.advanceScrollX(
-          currentX: item.xPosition,
-          previousTick: item.lastDrawTick!,
-          currentTick: tick,
-          viewWidth: startPosition,
-          danmakuWidth: item.width,
-          durationSeconds: danmakuDurationInSeconds,
-          playbackRate: playbackRate,
-        );
-
-        if (item.xPosition < -item.width || item.xPosition > size.width) {
-          continue;
-        }
-
-        item.paragraph ??= Utils.generateParagraph(
-            item.content, size.width, fontSize, fontWeight);
-
-        if (showStroke) {
-          item.strokeParagraph ??= Utils.generateStrokeParagraph(
-              item.content, size.width, fontSize, fontWeight);
-          pictureCanvas.drawParagraph(
-              item.strokeParagraph!, Offset(item.xPosition, item.yPosition));
-        }
-
-        if (item.content.selfSend) {
-          pictureCanvas.drawRect(
-              Offset(item.xPosition, item.yPosition).translate(-2, 2) &
-                  (Size(item.width, item.height) + const Offset(4, 0)),
-              selfSendPaint);
-        }
-
-        pictureCanvas.drawParagraph(
-            item.paragraph!, Offset(item.xPosition, item.yPosition));
-        item.lastDrawTick = tick;
+      item.lastDrawTick = frameTick;
+      if (item.xPosition < -item.width || item.xPosition > size.width) {
+        continue;
       }
 
-      final ui.Picture picture = pictureRecorder.endRecording();
-      canvas.drawPicture(picture);
-    } else {
-      // 弹幕数量较少时直接绘制 (节约创建 canvas 的开销)
-      for (var item in scrollDanmakuItems) {
-        item.lastDrawTick ??= item.creationTime;
-        item.xPosition = CanvasDanmakuTimeline.advanceScrollX(
-          currentX: item.xPosition,
-          previousTick: item.lastDrawTick!,
-          currentTick: tick,
-          viewWidth: startPosition,
-          danmakuWidth: item.width,
-          durationSeconds: danmakuDurationInSeconds,
-          playbackRate: playbackRate,
-        );
+      item.paragraph ??= Utils.generateParagraph(
+          item.content, size.width, fontSize, fontWeight);
 
-        if (item.xPosition < -item.width || item.xPosition > size.width) {
-          continue;
-        }
-
-        item.paragraph ??= Utils.generateParagraph(
+      if (showStroke) {
+        item.strokeParagraph ??= Utils.generateStrokeParagraph(
             item.content, size.width, fontSize, fontWeight);
-
-        if (showStroke) {
-          item.strokeParagraph ??= Utils.generateStrokeParagraph(
-              item.content, size.width, fontSize, fontWeight);
-          canvas.drawParagraph(
-              item.strokeParagraph!, Offset(item.xPosition, item.yPosition));
-        }
-
-        if (item.content.selfSend) {
-          canvas.drawRect(
-              Offset(item.xPosition, item.yPosition).translate(-2, 2) &
-                  (Size(item.width, item.height) + const Offset(4, 0)),
-              selfSendPaint);
-        }
-
         canvas.drawParagraph(
-            item.paragraph!, Offset(item.xPosition, item.yPosition));
-        item.lastDrawTick = tick;
+            item.strokeParagraph!, Offset(item.xPosition, item.yPosition));
       }
+
+      if (item.content.selfSend) {
+        canvas.drawRect(
+            Offset(item.xPosition, item.yPosition).translate(-2, 2) &
+                (Size(item.width, item.height) + const Offset(4, 0)),
+            selfSendPaint);
+      }
+
+      canvas.drawParagraph(
+          item.paragraph!, Offset(item.xPosition, item.yPosition));
     }
   }
 
