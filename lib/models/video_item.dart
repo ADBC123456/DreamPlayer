@@ -4,26 +4,66 @@ import 'hdr_format.dart';
 /// A chapter from the container or the media server (MKV `Chapters`,
 /// Jellyfin `MediaSources[].Chapters`).
 class VideoChapter {
-  const VideoChapter({
-    required this.title,
-    required this.startMs,
-    this.endMs,
-  });
+  const VideoChapter({required this.title, required this.startMs, this.endMs});
 
   final String title;
   final int startMs;
   final int? endMs;
 
   Map<String, dynamic> toJson() => {
-        'title': title,
-        'startMs': startMs,
-        if (endMs != null) 'endMs': endMs,
-      };
+    'title': title,
+    'startMs': startMs,
+    if (endMs != null) 'endMs': endMs,
+  };
 
   factory VideoChapter.fromJson(Map<String, dynamic> json) => VideoChapter(
-        title: json['title'] as String? ?? 'Chapter',
-        startMs: (json['startMs'] as num?)?.toInt() ?? 0,
-        endMs: (json['endMs'] as num?)?.toInt(),
+    title: json['title'] as String? ?? 'Chapter',
+    startMs: (json['startMs'] as num?)?.toInt() ?? 0,
+    endMs: (json['endMs'] as num?)?.toInt(),
+  );
+}
+
+/// Scraped title/episode identity carried separately from the physical file
+/// identity. TMDB ids are hints for display and danmaku lookup; resume and
+/// per-version caches continue to use [VideoItem.resumeKey].
+class VideoMetadataContext {
+  const VideoMetadataContext({
+    required this.titleId,
+    required this.displayTitle,
+    this.originalTitle,
+    this.seasonNumber,
+    this.episodeNumber,
+    this.episodeTitle,
+    required this.revision,
+  });
+
+  final String titleId;
+  final String displayTitle;
+  final String? originalTitle;
+  final int? seasonNumber;
+  final int? episodeNumber;
+  final String? episodeTitle;
+  final int revision;
+
+  Map<String, dynamic> toJson() => {
+    'titleId': titleId,
+    'displayTitle': displayTitle,
+    if (originalTitle != null) 'originalTitle': originalTitle,
+    if (seasonNumber != null) 'seasonNumber': seasonNumber,
+    if (episodeNumber != null) 'episodeNumber': episodeNumber,
+    if (episodeTitle != null) 'episodeTitle': episodeTitle,
+    'revision': revision,
+  };
+
+  factory VideoMetadataContext.fromJson(Map<String, dynamic> json) =>
+      VideoMetadataContext(
+        titleId: json['titleId'] as String? ?? '',
+        displayTitle: json['displayTitle'] as String? ?? '',
+        originalTitle: json['originalTitle'] as String?,
+        seasonNumber: (json['seasonNumber'] as num?)?.toInt(),
+        episodeNumber: (json['episodeNumber'] as num?)?.toInt(),
+        episodeTitle: json['episodeTitle'] as String?,
+        revision: (json['revision'] as num?)?.toInt() ?? 0,
       );
 }
 
@@ -44,12 +84,12 @@ class VideoExternalSub {
   final bool isDefault;
 
   Map<String, dynamic> toJson() => {
-        'uri': uri,
-        'label': label,
-        'language': language,
-        'mimeType': mimeType,
-        'isDefault': isDefault,
-      };
+    'uri': uri,
+    'label': label,
+    'language': language,
+    'mimeType': mimeType,
+    'isDefault': isDefault,
+  };
 
   factory VideoExternalSub.fromJson(Map<String, dynamic> json) =>
       VideoExternalSub(
@@ -64,12 +104,12 @@ class VideoExternalSub {
   /// Used to mark a track as the default selection without rebuilding the
   /// whole object.
   VideoExternalSub withDefault({required bool isDefault}) => VideoExternalSub(
-        uri: uri,
-        label: label,
-        language: language,
-        mimeType: mimeType,
-        isDefault: isDefault,
-      );
+    uri: uri,
+    label: label,
+    language: language,
+    mimeType: mimeType,
+    isDefault: isDefault,
+  );
 }
 
 /// Marks the first entry as the default selection when no entry in the
@@ -95,10 +135,7 @@ List<VideoExternalSub> promoteFirstExternalAsDefault(
   if (subs.isEmpty) return subs;
   final anyDefault = subs.any((s) => s.isDefault);
   if (anyDefault) return subs;
-  return [
-    subs.first.withDefault(isDefault: true),
-    ...subs.skip(1),
-  ];
+  return [subs.first.withDefault(isDefault: true), ...subs.skip(1)];
 }
 
 /// Where a video came from, derived from the source-specific [VideoItem]
@@ -146,6 +183,7 @@ class VideoItem {
     this.seasonNumber,
     this.episodeNumber,
     this.seriesName,
+    this.metadataContext,
   });
 
   final String id;
@@ -206,6 +244,8 @@ class VideoItem {
   /// Used for series-page grouping in continue-watching.
   final String? seriesName;
 
+  final VideoMetadataContext? metadataContext;
+
   final Duration duration;
   final int? sizeBytes;
   final String? resolution;
@@ -236,7 +276,9 @@ class VideoItem {
       if (key.startsWith('webdav_')) return PlaybackSource.webdav;
       if (key.startsWith('cx:')) return PlaybackSource.cxSmb;
       if (key.startsWith('folderbookmark:')) return PlaybackSource.filesSmb;
-      if (key.startsWith('smb:') || key.startsWith('smb_')) return PlaybackSource.smb;
+      if (key.startsWith('smb:') || key.startsWith('smb_')) {
+        return PlaybackSource.smb;
+      }
       if (key.startsWith('jellyfin:')) return PlaybackSource.jellyfin;
     }
     final u = uri;
@@ -282,6 +324,7 @@ class VideoItem {
       seasonNumber: seasonNumber,
       episodeNumber: episodeNumber,
       seriesName: seriesName,
+      metadataContext: metadataContext,
     );
   }
 
@@ -316,8 +359,77 @@ class VideoItem {
       seasonNumber: seasonNumber,
       episodeNumber: episodeNumber,
       seriesName: seriesName,
+      metadataContext: metadataContext,
     );
   }
+
+  /// Restores transient HTTP credentials from the source's secure store.
+  /// Authorization headers are deliberately not serialized by [toJson].
+  VideoItem withNetworkAccess({
+    required Map<String, String> httpHeaders,
+    String? webdavServerId,
+    bool? allowSelfSigned,
+  }) {
+    return VideoItem(
+      id: id,
+      title: title,
+      path: path,
+      uri: uri,
+      resumeKey: resumeKey,
+      duration: duration,
+      sizeBytes: sizeBytes,
+      resolution: resolution,
+      videoCodec: videoCodec,
+      hdrHint: hdrHint,
+      audioCodec: audioCodec,
+      audioProfile: audioProfile,
+      audioChannels: audioChannels,
+      subtitleUri: subtitleUri,
+      httpHeaders: httpHeaders,
+      allowSelfSigned: allowSelfSigned ?? this.allowSelfSigned,
+      jellyfinServerId: jellyfinServerId,
+      jellyfinItemId: jellyfinItemId,
+      webdavServerId: webdavServerId ?? this.webdavServerId,
+      ftpServerId: ftpServerId,
+      externalSubtitles: externalSubtitles,
+      chapters: chapters,
+      isTranscoded: isTranscoded,
+      seasonNumber: seasonNumber,
+      episodeNumber: episodeNumber,
+      seriesName: seriesName,
+      metadataContext: metadataContext,
+    );
+  }
+
+  VideoItem withMetadataContext(VideoMetadataContext context) => VideoItem(
+    id: id,
+    title: title,
+    path: path,
+    uri: uri,
+    resumeKey: resumeKey,
+    duration: duration,
+    sizeBytes: sizeBytes,
+    resolution: resolution,
+    videoCodec: videoCodec,
+    hdrHint: hdrHint,
+    audioCodec: audioCodec,
+    audioProfile: audioProfile,
+    audioChannels: audioChannels,
+    subtitleUri: subtitleUri,
+    httpHeaders: httpHeaders,
+    allowSelfSigned: allowSelfSigned,
+    jellyfinServerId: jellyfinServerId,
+    jellyfinItemId: jellyfinItemId,
+    webdavServerId: webdavServerId,
+    ftpServerId: ftpServerId,
+    externalSubtitles: externalSubtitles,
+    chapters: chapters,
+    isTranscoded: isTranscoded,
+    seasonNumber: seasonNumber,
+    episodeNumber: episodeNumber,
+    seriesName: seriesName,
+    metadataContext: context,
+  );
 
   String? get videoCodecLabel {
     final label = formatVideoCodec(videoCodec);
@@ -349,28 +461,33 @@ class VideoItem {
   }
 
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'title': title,
-        'path': path,
-        'uri': uri,
-        'resumeKey': resumeKey,
-        'durationMs': duration.inMilliseconds,
-        'sizeBytes': sizeBytes,
-        if (externalSubtitles.isNotEmpty)
-          'externalSubtitles':
-              externalSubtitles.map((s) => s.toJson()).toList(),
-        if (chapters.isNotEmpty)
-          'chapters': chapters.map((c) => c.toJson()).toList(),
-        if (isTranscoded) 'isTranscoded': true,
-        if (seasonNumber != null) 'seasonNumber': seasonNumber,
-        if (episodeNumber != null) 'episodeNumber': episodeNumber,
-        if (seriesName != null) 'seriesName': seriesName,
-        if (videoCodec != null) 'videoCodec': videoCodec,
-        if (audioCodec != null) 'audioCodec': audioCodec,
-        if (audioChannels != null) 'audioChannels': audioChannels,
-        if (resolution != null) 'resolution': resolution,
-        if (hdrHint != null) 'hdrHint': hdrHint,
-      };
+    'id': id,
+    'title': title,
+    'path': path,
+    'uri': uri,
+    'resumeKey': resumeKey,
+    'durationMs': duration.inMilliseconds,
+    'sizeBytes': sizeBytes,
+    if (externalSubtitles.isNotEmpty)
+      'externalSubtitles': externalSubtitles.map((s) => s.toJson()).toList(),
+    if (chapters.isNotEmpty)
+      'chapters': chapters.map((c) => c.toJson()).toList(),
+    if (isTranscoded) 'isTranscoded': true,
+    if (allowSelfSigned) 'allowSelfSigned': true,
+    if (jellyfinServerId != null) 'jellyfinServerId': jellyfinServerId,
+    if (jellyfinItemId != null) 'jellyfinItemId': jellyfinItemId,
+    if (webdavServerId != null) 'webdavServerId': webdavServerId,
+    if (ftpServerId != null) 'ftpServerId': ftpServerId,
+    if (seasonNumber != null) 'seasonNumber': seasonNumber,
+    if (episodeNumber != null) 'episodeNumber': episodeNumber,
+    if (seriesName != null) 'seriesName': seriesName,
+    if (metadataContext != null) 'metadataContext': metadataContext!.toJson(),
+    if (videoCodec != null) 'videoCodec': videoCodec,
+    if (audioCodec != null) 'audioCodec': audioCodec,
+    if (audioChannels != null) 'audioChannels': audioChannels,
+    if (resolution != null) 'resolution': resolution,
+    if (hdrHint != null) 'hdrHint': hdrHint,
+  };
 
   factory VideoItem.fromJson(Map<String, dynamic> json) {
     final rawSubs = json['externalSubtitles'] as List?;
@@ -381,25 +498,36 @@ class VideoItem {
       path: json['path'] as String?,
       uri: json['uri'] as String?,
       resumeKey: json['resumeKey'] as String?,
-      duration:
-          Duration(milliseconds: (json['durationMs'] as num?)?.toInt() ?? 0),
+      duration: Duration(
+        milliseconds: (json['durationMs'] as num?)?.toInt() ?? 0,
+      ),
       sizeBytes: (json['sizeBytes'] as num?)?.toInt(),
       externalSubtitles: rawSubs != null
           ? rawSubs
-              .whereType<Map<String, dynamic>>()
-              .map(VideoExternalSub.fromJson)
-              .toList()
+                .whereType<Map<String, dynamic>>()
+                .map(VideoExternalSub.fromJson)
+                .toList()
           : const [],
       chapters: rawChapters != null
           ? rawChapters
-              .whereType<Map<String, dynamic>>()
-              .map(VideoChapter.fromJson)
-              .toList()
+                .whereType<Map<String, dynamic>>()
+                .map(VideoChapter.fromJson)
+                .toList()
           : const [],
       isTranscoded: json['isTranscoded'] == true,
+      allowSelfSigned: json['allowSelfSigned'] == true,
+      jellyfinServerId: json['jellyfinServerId'] as String?,
+      jellyfinItemId: json['jellyfinItemId'] as String?,
+      webdavServerId: json['webdavServerId'] as String?,
+      ftpServerId: json['ftpServerId'] as String?,
       seasonNumber: (json['seasonNumber'] as num?)?.toInt(),
       episodeNumber: (json['episodeNumber'] as num?)?.toInt(),
       seriesName: json['seriesName'] as String?,
+      metadataContext: json['metadataContext'] is Map
+          ? VideoMetadataContext.fromJson(
+              (json['metadataContext'] as Map).cast<String, dynamic>(),
+            )
+          : null,
       videoCodec: json['videoCodec'] as String?,
       audioCodec: json['audioCodec'] as String?,
       audioChannels: json['audioChannels'] as String?,

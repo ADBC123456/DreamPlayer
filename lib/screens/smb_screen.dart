@@ -13,6 +13,7 @@ import '../widgets/tv_overscan.dart';
 import '../widgets/tv_text_field.dart';
 import '../widgets/tv_tile.dart';
 import 'tmd_details_screen.dart';
+import '../l10n/app_localizations.dart';
 
 /// SMB / LAN-share browser: saved servers -> shares -> folders -> videos.
 /// Playback streams through the native SMB client (local proxy URL on iOS);
@@ -51,7 +52,8 @@ class _SmbScreenState extends State<SmbScreen> {
   /// on every file row.
   Set<String> _watchedKeys = {};
 
-  bool get _atBrowseRoot => _browsing == null || (_share.isEmpty && _path.isEmpty);
+  bool get _atBrowseRoot =>
+      _browsing == null || (_share.isEmpty && _path.isEmpty);
 
   @override
   void initState() {
@@ -103,7 +105,8 @@ class _SmbScreenState extends State<SmbScreen> {
   Future<void> _probeStatuses(List<SmbServer> servers) async {
     if (servers.isEmpty) return;
     final results = await Future.wait([
-      for (final s in servers) _smb.checkServer(s.host, s.port).then((ok) => (s.id, ok)),
+      for (final s in servers)
+        _smb.checkServer(s.host, s.port).then((ok) => (s.id, ok)),
     ]);
     if (!mounted) return;
     setState(() {
@@ -206,7 +209,11 @@ class _SmbScreenState extends State<SmbScreen> {
     await LibraryFoldersStore.add(folder);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Bookmarked $folderName to Home (SMB · ${server.name})')),
+        SnackBar(
+          content: AppText(
+            'Bookmarked $folderName to Home (SMB · ${server.name})',
+          ),
+        ),
       );
     }
   }
@@ -216,7 +223,7 @@ class _SmbScreenState extends State<SmbScreen> {
     if (!client.isConfigured) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('SIMKL not configured')),
+          const SnackBar(content: AppText('SIMKL not configured')),
         );
       }
       return;
@@ -224,7 +231,7 @@ class _SmbScreenState extends State<SmbScreen> {
     if (!await client.isAuthenticated()) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Sign in to SIMKL first')),
+          const SnackBar(content: AppText('Sign in to SIMKL first')),
         );
       }
       return;
@@ -241,7 +248,9 @@ class _SmbScreenState extends State<SmbScreen> {
         if (meta == null) continue;
         final id = meta.movie.id;
         final isTv = meta.movie.kind == TmdKind.tv;
-        final shouldMark = isTv ? watched.showSeasons.containsKey(id) : watched.movieIds.contains(id);
+        final shouldMark = isTv
+            ? watched.showSeasons.containsKey(id)
+            : watched.movieIds.contains(id);
         // For episodes, also ensure season is in map (already counts as watched show).
         if (shouldMark) {
           await WatchedStore.set(key, true);
@@ -251,14 +260,20 @@ class _SmbScreenState extends State<SmbScreen> {
       await _refreshWatched();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(marked > 0 ? 'Marked $marked as watched from SIMKL' : 'Nothing new from SIMKL')),
+          SnackBar(
+            content: AppText(
+              marked > 0
+                  ? 'Marked $marked as watched from SIMKL'
+                  : 'Nothing new from SIMKL',
+            ),
+          ),
         );
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('SIMKL sync failed: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: AppText('SIMKL sync failed: $e')));
       }
     } finally {
       if (mounted) setState(() => _syncingSimkl = false);
@@ -308,19 +323,24 @@ class _SmbScreenState extends State<SmbScreen> {
       if (_tmdbMeta.containsKey(entry.path)) continue;
       _tmdbMeta[entry.path] = null; // placeholder to avoid duplicate requests
       final key = 'smb:${server.id}/$_share/${entry.path}';
-      service.resolve(VideoItem(
-        id: 'smb:$key',
-        title: entry.name,
-        uri: '',
-        resumeKey: key,
-        duration: Duration.zero,
-        sizeBytes: entry.size,
-      )).then((meta) {
-        if (!mounted) return;
-        setState(() {
-          _tmdbMeta[entry.path] = meta;
-        });
-      }).catchError((_) {});
+      service
+          .resolve(
+            VideoItem(
+              id: 'smb:$key',
+              title: entry.name,
+              uri: '',
+              resumeKey: key,
+              duration: Duration.zero,
+              sizeBytes: entry.size,
+            ),
+          )
+          .then((meta) {
+            if (!mounted) return;
+            setState(() {
+              _tmdbMeta[entry.path] = meta;
+            });
+          })
+          .catchError((_) {});
     }
   }
 
@@ -336,7 +356,9 @@ class _SmbScreenState extends State<SmbScreen> {
         });
         await _loadDirectory('');
       } else {
-        final cleanPath = entry.path.replaceAll('//', '/').replaceAll(RegExp(r'/+$'), '');
+        final cleanPath = entry.path
+            .replaceAll('//', '/')
+            .replaceAll(RegExp(r'/+$'), '');
         await _loadDirectory(cleanPath);
       }
       return;
@@ -349,7 +371,9 @@ class _SmbScreenState extends State<SmbScreen> {
     // open just it and navigate immediately — the folder loop that opened every
     // video up-front made TMDB details feel slow (ring spinner while N serial
     // openShare round-trips ran).
-    final index = _entries.indexWhere((e) => !e.isDirectory && e.path == entry.path);
+    final index = _entries.indexWhere(
+      (e) => !e.isDirectory && e.path == entry.path,
+    );
     if (index < 0) return;
     final video = _entries[index];
 
@@ -360,7 +384,11 @@ class _SmbScreenState extends State<SmbScreen> {
     try {
       videoUrl = await _smb.openShare(server.id, _share, video.path);
       // All matching subtitles (video.srt, video.eng.srt, ...).
-      final subPaths = video.subtitlePaths ?? (video.subtitlePath != null ? [video.subtitlePath!] : const <String>[]);
+      final subPaths =
+          video.subtitlePaths ??
+          (video.subtitlePath != null
+              ? [video.subtitlePath!]
+              : const <String>[]);
       if (subPaths.isNotEmpty) {
         final subs = <VideoExternalSub>[];
         for (final p in subPaths) {
@@ -370,15 +398,17 @@ class _SmbScreenState extends State<SmbScreen> {
             final mime = ext == 'ass' || ext == 'ssa'
                 ? 'text/x-ssa'
                 : ext == 'vtt'
-                    ? 'text/vtt'
-                    : 'application/x-subrip';
-            subs.add(VideoExternalSub(
-              uri: u,
-              label: p.split('/').last,
-              language: '',
-              mimeType: mime,
-              isDefault: subs.isEmpty,
-            ));
+                ? 'text/vtt'
+                : 'application/x-subrip';
+            subs.add(
+              VideoExternalSub(
+                uri: u,
+                label: p.split('/').last,
+                language: '',
+                mimeType: mime,
+                isDefault: subs.isEmpty,
+              ),
+            );
           } catch (_) {}
         }
         if (subs.isNotEmpty) {
@@ -397,7 +427,7 @@ class _SmbScreenState extends State<SmbScreen> {
     if (!mounted) return;
     if (videoUrl == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not open ${entry.name}')),
+        SnackBar(content: AppText('Could not open ${entry.name}')),
       );
       return;
     }
@@ -421,9 +451,7 @@ class _SmbScreenState extends State<SmbScreen> {
 
     if (!mounted) return;
     await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => TmdDetailsScreen(video: item),
-      ),
+      MaterialPageRoute<void>(builder: (_) => TmdDetailsScreen(video: item)),
     );
     // Playback session over: tear down the SMB stream and disconnect.
     _smb.closeShare(server.id);
@@ -435,7 +463,9 @@ class _SmbScreenState extends State<SmbScreen> {
       return;
     }
     if (_path.isNotEmpty) {
-      final normalized = _path.replaceAll('//', '/').replaceAll(RegExp(r'/+$'), '');
+      final normalized = _path
+          .replaceAll('//', '/')
+          .replaceAll(RegExp(r'/+$'), '');
       final slash = normalized.lastIndexOf('/');
       final parentPath = slash <= 0 ? '' : normalized.substring(0, slash);
       await _loadDirectory(parentPath);
@@ -499,17 +529,17 @@ class _SmbScreenState extends State<SmbScreen> {
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Cancel'),
+            child: const AppText('Cancel'),
           ),
           FilledButton.icon(
             style: FilledButton.styleFrom(
               shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(10)),
+                borderRadius: BorderRadius.circular(10),
+              ),
             ),
-            onPressed: () =>
-                Navigator.of(context).pop(controller.text.trim()),
+            onPressed: () => Navigator.of(context).pop(controller.text.trim()),
             icon: const Icon(Icons.add_rounded, size: 16),
-            label: const Text('Add'),
+            label: const AppText('Add'),
           ),
         ],
       ),
@@ -524,15 +554,16 @@ class _SmbScreenState extends State<SmbScreen> {
   void _editServer(SmbServer server) => _showServerDialog(existing: server);
 
   void _addDiscoveredServer(SmbDiscovered d) => _showServerDialog(
-        initialHost: d.host,
-        initialName: d.hostname != d.host ? d.hostname : null,
-      );
+    initialHost: d.host,
+    initialName: d.hostname != d.host ? d.hostname : null,
+  );
 
   Future<void> _deleteServer(SmbServer server) async {
     await _smb.deleteServer(server.id);
     if (!mounted) return;
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text('Removed ${server.name}')));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: AppText('Removed ${server.name}')));
     _loadServers();
   }
 
@@ -557,12 +588,12 @@ class _SmbScreenState extends State<SmbScreen> {
     final browsing = _browsing;
     return Scaffold(
       appBar: AppBar(
-        title: Text(browsing == null
-            ? 'Network shares'
-            : _breadcrumbTitle(browsing)),
+        title: AppText(
+          browsing == null ? 'Network shares' : _breadcrumbTitle(browsing),
+        ),
         leading: browsing != null
             ? IconButton(
-                tooltip: 'Up',
+                tooltip: context.tr('Up'),
                 icon: const Icon(Icons.arrow_back),
                 onPressed: _goUp,
               )
@@ -570,21 +601,25 @@ class _SmbScreenState extends State<SmbScreen> {
         actions: [
           if (browsing != null && _share.isNotEmpty && !_loading)
             IconButton(
-              tooltip: 'Bookmark this folder to Home',
+              tooltip: context.tr('Bookmark this folder to Home'),
               icon: const Icon(Icons.bookmark_add_outlined),
               onPressed: _bookmarkCurrentFolder,
             ),
           if (browsing != null && _share.isNotEmpty && !_loading)
             IconButton(
-              tooltip: 'Sync watched from SIMKL',
+              tooltip: context.tr('Sync watched from SIMKL'),
               icon: _syncingSimkl
-                  ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
                   : const Icon(Icons.cloud_done_outlined),
               onPressed: _syncingSimkl ? null : _syncFromSimkl,
             ),
           if (browsing != null)
             IconButton(
-              tooltip: 'Server list',
+              tooltip: context.tr('Server list'),
               icon: const Icon(Icons.dns_outlined),
               onPressed: () => setState(() {
                 _browsing = null;
@@ -612,33 +647,33 @@ class _SmbScreenState extends State<SmbScreen> {
                   FloatingActionButton(
                     heroTag: 'smb_scan',
                     onPressed: _discover,
-                    tooltip: 'Scan network',
+                    tooltip: context.tr('Scan network'),
                     child: const Icon(Icons.wifi_find),
                   ),
                 const SizedBox(height: 12),
                 FloatingActionButton(
                   heroTag: 'smb_refresh',
                   onPressed: _loadServers,
-                  tooltip: 'Refresh',
+                  tooltip: context.tr('Refresh'),
                   child: const Icon(Icons.refresh),
                 ),
                 const SizedBox(height: 12),
                 FloatingActionButton(
                   heroTag: 'smb_add',
                   onPressed: _addServer,
-                  tooltip: 'Add server',
+                  tooltip: context.tr('Add server'),
                   child: const Icon(Icons.add),
                 ),
               ],
             )
           : _share.isEmpty
-              ? FloatingActionButton(
-                  heroTag: 'smb_add_share',
-                  onPressed: _addShare,
-                  tooltip: 'Add share',
-                  child: const Icon(Icons.add),
-                )
-              : null,
+          ? FloatingActionButton(
+              heroTag: 'smb_add_share',
+              onPressed: _addShare,
+              tooltip: context.tr('Add share'),
+              child: const Icon(Icons.add),
+            )
+          : null,
       body: TvOverscan(child: _body(context)),
     );
   }
@@ -664,13 +699,15 @@ class _SmbScreenState extends State<SmbScreen> {
             children: [
               const Icon(Icons.cloud_off_outlined, size: 64),
               const SizedBox(height: 16),
-              Text('Error: $_error',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: Theme.of(context).colorScheme.error)),
+              AppText(
+                'Error: $_error',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
               const SizedBox(height: 16),
               FilledButton(
                 onPressed: _atBrowseRoot ? _loadServers : _goUp,
-                child: const Text('Retry'),
+                child: const AppText('Retry'),
               ),
             ],
           ),
@@ -682,10 +719,10 @@ class _SmbScreenState extends State<SmbScreen> {
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(24),
-          child: Text(
+          child: AppText(
             _share.isEmpty
                 ? 'No shares found. Tap "Add share" and enter the name '
-                    'manually if your NAS uses an unusual share name.'
+                      'manually if your NAS uses an unusual share name.'
                 : 'Nothing here',
             textAlign: TextAlign.center,
             style: Theme.of(context).textTheme.titleMedium,
@@ -725,10 +762,7 @@ class _SmbScreenState extends State<SmbScreen> {
           children: [
             Icon(Icons.dns_outlined, size: 48, color: Colors.white38),
             SizedBox(height: 12),
-              Text(
-                'Nothing yet',
-                style: TextStyle(color: Colors.white54),
-              ),
+            AppText('Nothing yet', style: TextStyle(color: Colors.white54)),
           ],
         ),
       );
@@ -749,7 +783,7 @@ class _SmbScreenState extends State<SmbScreen> {
                     child: CircularProgressIndicator(strokeWidth: 2),
                   ),
                   SizedBox(width: 12),
-                  Text('Scanning your network…'),
+                  AppText('Scanning your network…'),
                 ],
               ),
             ),
@@ -758,12 +792,12 @@ class _SmbScreenState extends State<SmbScreen> {
             for (final d in _discovered)
               TvTile(
                 leading: const Icon(Icons.lan_outlined),
-                title: Text(
+                title: AppText(
                   d.hostname,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
-                subtitle: Text(
+                subtitle: AppText(
                   d.host,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
@@ -791,8 +825,8 @@ class _SmbScreenState extends State<SmbScreen> {
         color: status == null
             ? Colors.grey.shade600
             : status
-                ? Colors.lightGreenAccent
-                : Colors.redAccent,
+            ? Colors.lightGreenAccent
+            : Colors.redAccent,
         border: Border.all(color: Colors.black, width: 1.5),
       ),
     );
@@ -804,12 +838,8 @@ class _SmbScreenState extends State<SmbScreen> {
           Positioned(right: -3, bottom: -3, child: dot),
         ],
       ),
-      title: Text(
-        server.name,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-      ),
-      subtitle: Text(
+      title: AppText(server.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+      subtitle: AppText(
         server.subtitle,
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
@@ -823,8 +853,8 @@ class _SmbScreenState extends State<SmbScreen> {
           }
         },
         itemBuilder: (_) => const [
-          PopupMenuItem(value: 'edit', child: Text('Edit')),
-          PopupMenuItem(value: 'delete', child: Text('Delete')),
+          PopupMenuItem(value: 'edit', child: AppText('Edit')),
+          PopupMenuItem(value: 'delete', child: AppText('Delete')),
         ],
       ),
       onTap: () => _openServer(server),
@@ -841,12 +871,12 @@ class _SectionHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
-      child: Text(
+      child: AppText(
         label,
         style: Theme.of(context).textTheme.labelLarge?.copyWith(
-              color: Theme.of(context).colorScheme.primary,
-              fontWeight: FontWeight.w600,
-            ),
+          color: Theme.of(context).colorScheme.primary,
+          fontWeight: FontWeight.w600,
+        ),
       ),
     );
   }
@@ -882,10 +912,10 @@ class _SmbTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final icon = entry.isDirectory
-        ? Icons.folder
-        : Icons.play_circle_outline;
-    final color = entry.isDirectory ? colorScheme.primary : colorScheme.secondary;
+    final icon = entry.isDirectory ? Icons.folder : Icons.play_circle_outline;
+    final color = entry.isDirectory
+        ? colorScheme.primary
+        : colorScheme.secondary;
     final subtitle = entry.isDirectory ? null : _sizeLabel(entry.size);
     final posterUrl = tmdbMeta?.movie.posterPath != null
         ? 'https://image.tmdb.org/t/p/w185${tmdbMeta!.movie.posterPath}'
@@ -904,12 +934,8 @@ class _SmbTile extends StatelessWidget {
               ),
             )
           : Icon(icon, color: color),
-      title: Text(
-        entry.name,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-      ),
-      subtitle: subtitle == null ? null : Text(subtitle),
+      title: AppText(entry.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+      subtitle: subtitle == null ? null : AppText(subtitle),
       trailing: entry.isDirectory
           ? const Icon(Icons.chevron_right)
           : Row(
@@ -918,14 +944,20 @@ class _SmbTile extends StatelessWidget {
                 if (watched)
                   const Padding(
                     padding: EdgeInsets.only(right: 4),
-                    child: Icon(Icons.check_circle, color: Colors.green, size: 20),
+                    child: Icon(
+                      Icons.check_circle,
+                      color: Colors.green,
+                      size: 20,
+                    ),
                   ),
                 if (onToggleWatched != null)
                   IconButton(
                     tooltip: watched ? 'Mark as unwatched' : 'Mark as watched',
                     icon: Icon(
                       watched ? Icons.check_circle : Icons.check_circle_outline,
-                      color: watched ? Colors.green.shade400 : Theme.of(context).colorScheme.onSurfaceVariant,
+                      color: watched
+                          ? Colors.green.shade400
+                          : Theme.of(context).colorScheme.onSurfaceVariant,
                       size: 22,
                     ),
                     onPressed: onToggleWatched,
@@ -974,8 +1006,7 @@ class _ServerFormDialogState extends State<_ServerFormDialog> {
     final s = widget.existing;
     _name = TextEditingController(text: s?.name ?? widget.initialName ?? '');
     _host = TextEditingController(text: s?.host ?? widget.initialHost ?? '');
-    _port = TextEditingController(
-        text: (s?.port ?? 445).toString());
+    _port = TextEditingController(text: (s?.port ?? 445).toString());
     _username = TextEditingController(text: s?.username ?? '');
     _password = TextEditingController(text: '');
     _domain = TextEditingController(text: s?.domain ?? '');
@@ -1010,8 +1041,9 @@ class _ServerFormDialogState extends State<_ServerFormDialog> {
     setState(() {
       _testing = false;
       _resultSuccess = result.ok;
-      _resultMessage =
-          result.ok ? 'Connected' : 'Failed: ${result.error ?? 'unknown error'}';
+      _resultMessage = result.ok
+          ? 'Connected'
+          : 'Failed: ${result.error ?? 'unknown error'}';
     });
   }
 
@@ -1102,8 +1134,9 @@ class _ServerFormDialogState extends State<_ServerFormDialog> {
                           child: TvTextField(
                             controller: _port,
                             keyboardType: TextInputType.number,
-                            textInputAction:
-                                _guest ? TextInputAction.done : TextInputAction.next,
+                            textInputAction: _guest
+                                ? TextInputAction.done
+                                : TextInputAction.next,
                             decoration: serverFieldDecoration(
                               context,
                               label: 'Port',
@@ -1119,8 +1152,10 @@ class _ServerFormDialogState extends State<_ServerFormDialog> {
                       controlAffinity: ListTileControlAffinity.leading,
                       dense: true,
                       activeThumbColor: theme.colorScheme.primary,
-                      title: const Text('Guest — no username/password',
-                          style: TextStyle(fontSize: 14)),
+                      title: const AppText(
+                        'Guest — no username/password',
+                        style: TextStyle(fontSize: 14),
+                      ),
                       value: _guest,
                       onChanged: (v) => setState(() => _guest = v),
                     ),
@@ -1176,30 +1211,33 @@ class _ServerFormDialogState extends State<_ServerFormDialog> {
         OutlinedButton.icon(
           style: OutlinedButton.styleFrom(
             side: BorderSide(color: theme.colorScheme.outline),
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
           ),
           onPressed: _testing ? null : _test,
           icon: _testing
               ? const SizedBox(
                   width: 14,
                   height: 14,
-                  child: CircularProgressIndicator(strokeWidth: 2))
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
               : const Icon(Icons.wifi_tethering, size: 16),
-          label: const Text('Test'),
+          label: const AppText('Test'),
         ),
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
+          child: const AppText('Cancel'),
         ),
         FilledButton.icon(
           style: FilledButton.styleFrom(
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
           ),
           onPressed: _save,
           icon: const Icon(Icons.check_rounded, size: 16),
-          label: const Text('Save'),
+          label: const AppText('Save'),
         ),
       ],
     );

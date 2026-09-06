@@ -1,0 +1,621 @@
+import 'dart:async';
+
+import 'episode_mapper.dart';
+import 'scrape_store.dart' as store;
+import 'scrape_state.dart';
+import '../source/danmaku_source_registry.dart';
+
+/// Identity the Agent-B adapter can hash/match with (PRD 匹配优先级:
+/// hash+文件名+大小 → hash+文件名 → 文件名+大小 → 剧名/季/集 文本匹配).
+class VideoIdentity {
+  const VideoIdentity({
+    required this.fileName,
+    this.fileHash,
+    this.fileSize,
+    this.seriesTitle,
+    this.season,
+    this.episode,
+  });
+
+  final String fileName;
+  final String? fileHash;
+  final int? fileSize;
+  final String? seriesTitle;
+  final int? season;
+  final int? episode;
+
+  VideoIdentity fromVideo(ScrapeVideo v, SeriesScope scope) => VideoIdentity(
+    fileName: v.fileName,
+    fileHash: v.fileHash,
+    fileSize: v.sizeBytes,
+    seriesTitle: scope.seriesTitle,
+    season: v.season ?? scope.season,
+    episode: v.episode,
+  );
+}
+
+/// The Agent-B seam (danmu_api-compatible source adapter). The orchestrator
+/// only talks to this interface, so B can ship its HTTP client without
+/// touching anything here.
+abstract interface class DanmakuScrapeSource {
+  /// `GET /api/v2/search/episodes?anime={title}` — remote episode catalog.
+  Future<List<DanmakuCatalogAnime>> searchEpisodes(
+    String title, {
+    DanmakuCancelToken? cancelToken,
+  });
+
+  /// `POST /api/v2/match` — per-file fallback when the catalog mapping is
+  /// ambiguous or missing. Returns null when the server reports no match
+  /// (`isMatched=false` / empty `matches`).
+  Future<DanmakuEpisodeRef?> match(
+    VideoIdentity video, {
+    DanmakuCancelToken? cancelToken,
+  });
+}
+
+/// The Agent-C seam (cache repository). Fetches comments for a resolved ref
+/// and persists them under (source, baseUrl, videoKey, schemaVersion).
+abstract interface class DanmakuScrapeRepository {
+  /// True when a valid danmaku cache exists for [videoKey]. [forceRefresh]
+  /// short-circuits the check (batch "重新刮削").
+  Future<bool> hasValidCache(String videoKey, {bool forceRefresh = false});
+
+  /// Downloads the comments for [ref] and caches them against [videoKey].
+  /// Returns the stored comment count (0 = empty episode, still cached).
+  Future<int> fetchAndCache(
+    DanmakuEpisodeRef ref,
+    String videoKey, {
+    DanmakuCancelToken? cancelToken,
+  });
+}
+
+/// Result of one batch run.
+class SeriesScrapeResult {
+  const SeriesScrapeResult({required this.completed, required this.generation});
+
+  final bool completed;
+  final int generation;
+}
+
+/// Whole-series danmaku scrape orchestrator (PRD 当前剧集一键刮削).
+///
+/// - One catalog request up front (`searchEpisodes(scope.seriesTitle)`); each
+///   video first maps via precise S/E numbers, falls back to /match.
+/// - Concurrency limited to [maxConcurrency] (default 2) with a per-source
+///   pacing gap between request starts (default 300–500 ms; clamped).
+/// - 429/5xx/timeout ([DanmakuScrapeException.retryable] and unknown network
+///   errors) retried [maxRetries] times with exponential backoff; non-retryable
+///   failures (401/403-style) fail immediately.
+/// - One episode failing never blocks the others.
+/// - [cancel] and generation guards keep stale results from writing back; every
+///   terminal episode state is persisted through [ScrapeStore] so an app
+///   restart restores cached/failed results.
+class SeriesScraper {
+  SeriesScraper({
+    required this.source,
+    required this.repository,
+    this.maxConcurrency = 2,
+    this.minRequestGap = const Duration(milliseconds: 300),
+    this.maxRetries = 2,
+    this.backoffBase = const Duration(milliseconds: 600),
+    this.backoffMax = const Duration(seconds: 3),
+    this.onChanged,
+  });
+  final void Function()? onChanged;
+  final DanmakuScrapeSource source;
+  final DanmakuScrapeRepository repository;
+  final int maxConcurrency;
+  final Duration minRequestGap;
+  final int maxRetries;
+  final Duration backoffBase;
+  final Duration backoffMax;
+
+  SeriesScrapeState? _state;
+  int _generation = 0;
+  bool _cancelRequested = false;
+  DanmakuCancelToken? _cancelToken;
+
+  /// Live state for the UI (read-only consumption; mutate via the scraper).
+  SeriesScrapeState? get state => _state;
+
+  /// Restores the last persisted terminal snapshot for this source/series.
+  /// Transient rows are normalized to pending by [ScrapeStore].
+  Future<SeriesScrapeState?> restore(SeriesScope scope) async {
+    final restored = await store.ScrapeStore.loadTask(scope);
+    if (restored == null) return null;
+    _state = restored;
+    _generation = restored.generation;
+    _cancelRequested = false;
+    _notify();
+    return restored;
+  }
+
+  bool get _isStale => _cancelRequested;
+
+  void _notify() => onChanged?.call();
+
+  /// Starts (or restarts) the batch scrape for [videos] under [scope].
+  ///
+  /// Bumps the generation, invalidates any previous run, and returns when the
+  /// whole batch reaches a terminal outcome. `forceRefresh` re-downloads
+  /// episodes that already have a cache.
+  Future<SeriesScrapeResult> start(
+    SeriesScope scope,
+    List<ScrapeVideo> videos, {
+    bool forceRefresh = false,
+  }) async {
+    final generation = ++_generation;
+    _cancelToken?.cancel();
+    final cancelToken = DanmakuCancelToken();
+    _cancelToken = cancelToken;
+    _cancelRequested = false;
+    final st = SeriesScrapeState(scope: scope, generation: generation);
+    _state = st;
+
+    st.phase = ScrapePhase.scanning;
+    _notify();
+
+    for (final v in videos) {
+      st.episodes.add(
+        ScrapeEpisodeState(
+          key: v.key,
+          fileName: v.fileName,
+          status: ScrapeStatus.pending,
+          season: v.season,
+          episode: v.episode,
+        ),
+      );
+    }
+    await store.ScrapeStore.saveTask(st);
+    _notify();
+
+    // Resolve cache hits before touching the network. A fully scraped series
+    // completes without even issuing the catalog search request.
+    final pendingVideos = <ScrapeVideo>[];
+    for (var i = 0; i < videos.length; i++) {
+      var cached = false;
+      try {
+        cached = await repository.hasValidCache(
+          videos[i].key,
+          forceRefresh: forceRefresh,
+        );
+      } on Exception {
+        // A cache read failure is a miss; the normal fetch path may repair it.
+      }
+      if (_isStale || generation != _generation) {
+        return SeriesScrapeResult(completed: false, generation: generation);
+      }
+      if (cached && !forceRefresh) {
+        st.episodes[i] = st.episodes[i].copyWith(status: ScrapeStatus.cached);
+      } else {
+        pendingVideos.add(videos[i]);
+      }
+    }
+    _notify();
+    await store.ScrapeStore.saveTask(st);
+    if (pendingVideos.isEmpty) {
+      st.phase = ScrapePhase.completed;
+      _notify();
+      await store.ScrapeStore.saveTask(st);
+      return SeriesScrapeResult(completed: true, generation: generation);
+    }
+
+    // 1. Remote catalog (single request for the whole series).
+    st.phase = ScrapePhase.matching;
+    _notify();
+    List<DanmakuCatalogAnime> catalog;
+    try {
+      catalog = await _withRetry(
+        () =>
+            source.searchEpisodes(scope.seriesTitle, cancelToken: cancelToken),
+        cancelToken: cancelToken,
+      );
+    } on DanmakuScrapeException {
+      if (_isStale || generation != _generation) {
+        return SeriesScrapeResult(completed: false, generation: generation);
+      }
+      // Catalog failed after retries: whole run fails but leaves per-episode
+      // states untouched (they were all still pending).
+      st.phase = ScrapePhase.failed;
+      _notify();
+      await store.ScrapeStore.saveTask(st);
+      return SeriesScrapeResult(completed: false, generation: generation);
+    }
+    if (_isStale || generation != _generation) {
+      return SeriesScrapeResult(completed: false, generation: generation);
+    }
+
+    // 2. Process episodes with bounded concurrency.
+    st.phase = ScrapePhase.downloading;
+    _notify();
+    final videosList = pendingVideos;
+    var nextIndex = 0;
+    Future<void> worker() async {
+      while (true) {
+        if (_isStale || generation != _generation) return;
+        final i = nextIndex++;
+        if (i >= videosList.length) return;
+        await _processOne(
+          scope,
+          videosList[i],
+          catalog,
+          st,
+          generation,
+          cancelToken,
+          forceRefresh: forceRefresh,
+        );
+      }
+    }
+
+    final workers = List.generate(
+      maxConcurrency.clamp(1, videosList.isEmpty ? 1 : videosList.length),
+      (_) => worker(),
+      growable: false,
+    );
+    await Future.wait(workers);
+
+    if (_isStale || generation != _generation) {
+      st.phase = ScrapePhase.cancelled;
+      _notify();
+      await store.ScrapeStore.saveTask(st);
+      return SeriesScrapeResult(completed: false, generation: generation);
+    }
+
+    st.phase = st.hasFailure || st.noMatchCount > 0
+        ? ScrapePhase.partialFailure
+        : ScrapePhase.completed;
+    _notify();
+    await store.ScrapeStore.saveTask(st);
+    return SeriesScrapeResult(completed: true, generation: generation);
+  }
+
+  /// Re-runs only failed/noMatch episodes. The retried subset runs through
+  /// [start]; terminal states from the previous run are merged back so the
+  /// task view still shows the whole series.
+  Future<SeriesScrapeResult> retryFailed(SeriesScope scope) async {
+    final previous = _requireSameScope(scope);
+    final keep = previous.episodes
+        .where(
+          (e) =>
+              e.status != ScrapeStatus.failed &&
+              e.status != ScrapeStatus.noMatch,
+        )
+        .toList();
+    final videos = <ScrapeVideo>[
+      for (final e in previous.episodes)
+        if (e.status == ScrapeStatus.failed || e.status == ScrapeStatus.noMatch)
+          ScrapeVideo(
+            key: e.key,
+            fileName: e.fileName,
+            season: e.season,
+            episode: e.episode,
+          ),
+    ];
+    if (videos.isEmpty) {
+      return SeriesScrapeResult(completed: true, generation: _generation);
+    }
+    final result = await start(scope, videos, forceRefresh: false);
+    if (!result.completed) return result;
+
+    // Merge: previous keepers + the freshly retried rows.
+    final st = _state!;
+    final merged = [...keep, ...st.episodes];
+    st.episodes
+      ..clear()
+      ..addAll(merged);
+    _notify();
+    await store.ScrapeStore.saveTask(st);
+    return result;
+  }
+
+  /// Cancels the active run. In-flight episodes flip to [ScrapeStatus.cancelled].
+  Future<void> cancel() async {
+    _cancelRequested = true;
+    _cancelToken?.cancel();
+    final st = _state;
+    if (st == null) return;
+    var dirty = false;
+    for (var i = 0; i < st.episodes.length; i++) {
+      final s = st.episodes[i].status;
+      if (s == ScrapeStatus.pending ||
+          s == ScrapeStatus.matched ||
+          s == ScrapeStatus.fetching) {
+        st.episodes[i] = st.episodes[i].copyWith(
+          status: ScrapeStatus.cancelled,
+        );
+        dirty = true;
+      }
+    }
+    if (dirty) {
+      st.phase = ScrapePhase.cancelled;
+      _notify();
+      await store.ScrapeStore.saveTask(st);
+    }
+  }
+
+  SeriesScrapeState _requireSameScope(SeriesScope scope) {
+    final st = _state;
+    if (st == null || st.scope.storeKey != scope.storeKey) {
+      throw StateError('no active run for this scope; call start() first');
+    }
+    return st;
+  }
+
+  Future<void> _processOne(
+    SeriesScope scope,
+    ScrapeVideo video,
+    List<DanmakuCatalogAnime> catalog,
+    SeriesScrapeState st,
+    int generation,
+    DanmakuCancelToken cancelToken, {
+    required bool forceRefresh,
+  }) async {
+    final idx = st.episodes.indexWhere((e) => e.key == video.key);
+    if (idx < 0) return;
+
+    // 1. Cache check — skip already-scraped episodes unless forced.
+    final cached = await repository.hasValidCache(
+      video.key,
+      forceRefresh: forceRefresh,
+    );
+    if (_isStale || generation != _generation) return;
+    if (cached && !forceRefresh) {
+      st.episodes[idx] = st.episodes[idx].copyWith(status: ScrapeStatus.cached);
+      _notify();
+      await store.ScrapeStore.saveTask(st);
+      return;
+    }
+    DanmakuEpisodeRef? ref;
+    var matchAttempted = false;
+    Future<DanmakuEpisodeRef?> requestMatch() async {
+      matchAttempted = true;
+      await _pace();
+      if (_isStale || generation != _generation) return null;
+      return _withRetry<DanmakuEpisodeRef?>(
+        () => source.match(
+          VideoIdentity(
+            fileName: video.fileName,
+            fileHash: video.fileHash,
+            fileSize: video.sizeBytes,
+            seriesTitle: scope.seriesTitle,
+            season: video.season ?? scope.season,
+            episode: video.episode,
+          ),
+          cancelToken: cancelToken,
+        ),
+        cancelToken: cancelToken,
+      );
+    }
+
+    try {
+      // A content hash is stronger than title/catalog heuristics. Remote
+      // files without a hash use the catalog first to avoid one match request
+      // per episode.
+      if (video.fileHash?.isNotEmpty == true) {
+        ref = await requestMatch();
+      }
+      ref ??= _mapFromCatalog(video, scope, catalog);
+      if (ref == null && !matchAttempted) {
+        ref = await requestMatch();
+      }
+    } on DanmakuScrapeException catch (e) {
+      if (_isStale || generation != _generation) return;
+      st.episodes[idx] = st.episodes[idx].copyWith(
+        status: ScrapeStatus.failed,
+        error: e.message,
+      );
+      _notify();
+      await store.ScrapeStore.saveTask(st);
+      return;
+    }
+    if (_isStale || generation != _generation) return;
+
+    if (ref == null) {
+      st.episodes[idx] = st.episodes[idx].copyWith(
+        status: ScrapeStatus.noMatch,
+      );
+      _notify();
+      await store.ScrapeStore.saveTask(st);
+      return;
+    }
+
+    st.episodes[idx] = st.episodes[idx].copyWith(
+      status: ScrapeStatus.matched,
+      ref: ref,
+      clearError: true,
+    );
+    _notify();
+
+    // 3. Fetch + cache.
+    st.episodes[idx] = st.episodes[idx].copyWith(status: ScrapeStatus.fetching);
+    _notify();
+    await _pace();
+    if (_isStale || generation != _generation) return;
+    try {
+      final count = await _withRetry<int>(
+        () =>
+            repository.fetchAndCache(ref!, video.key, cancelToken: cancelToken),
+        cancelToken: cancelToken,
+      );
+      if (_isStale || generation != _generation) return;
+      st.episodes[idx] = st.episodes[idx].copyWith(
+        status: count > 0 ? ScrapeStatus.success : ScrapeStatus.empty,
+        commentCount: count,
+        error: null,
+        fetchedAt: DateTime.now(),
+      );
+    } on DanmakuScrapeException catch (e) {
+      if (_isStale || generation != _generation) return;
+      st.episodes[idx] = st.episodes[idx].copyWith(
+        status: ScrapeStatus.failed,
+        error: e.message,
+      );
+    }
+    _notify();
+    await store.ScrapeStore.saveTask(st);
+  }
+
+  /// Precise S/E mapping against the catalog; null → needs /match.
+  DanmakuEpisodeRef? _mapFromCatalog(
+    ScrapeVideo video,
+    SeriesScope scope,
+    List<DanmakuCatalogAnime> catalog,
+  ) {
+    if (catalog.isEmpty) return null;
+
+    final DanmakuCatalogAnime anime;
+    if (catalog.length == 1) {
+      anime = catalog.single;
+    } else {
+      final expectedSeason = video.season ?? scope.season;
+      if (expectedSeason == null) return null;
+      final seasonMatches = catalog
+          .where(
+            (candidate) =>
+                _seasonFromTitle(candidate.animeTitle) == expectedSeason,
+          )
+          .toList();
+      if (seasonMatches.length != 1) return null;
+      anime = seasonMatches.single;
+    }
+    if (anime.episodes.isEmpty) return null;
+
+    final parsed = DanmakuEpisodeParser.parse(
+      video.fileName,
+      folderName: (video.season ?? scope.season) == null
+          ? null
+          : 'Season ${video.season ?? scope.season}',
+    );
+    final info = video.episode == null
+        ? parsed
+        : EpisodeInfo(
+            source: video.season == null
+                ? EpisodeSource.episodeOnly
+                : EpisodeSource.seasonEpisode,
+            season: video.season ?? scope.season ?? parsed.season,
+            episode: video.episode!,
+            seriesName: parsed.seriesName,
+          );
+    final mapped = DanmuEpisodeMapper.match(info, [
+      for (final episode in anime.episodes)
+        DanmuCatalogEpisode(
+          episodeId: episode.episodeId,
+          episodeTitle: episode.episodeTitle,
+          animeId: anime.animeId,
+          animeTitle: anime.animeTitle,
+          episodeNumber:
+              episode.episodeNumber ??
+              DanmakuEpisodeParser.parse(episode.episodeTitle).episode,
+        ),
+    ], season: video.season ?? scope.season);
+
+    DanmuCatalogEpisode? ep;
+    if (mapped.status == EpisodeMatchStatus.mapped) {
+      ep = mapped.episode;
+    } else if (mapped.status == EpisodeMatchStatus.special) {
+      final ranked = [
+        for (final candidate in mapped.candidates)
+          (
+            candidate,
+            DanmuEpisodeMapper.titleSimilarity(
+              video.fileName,
+              candidate.episodeTitle,
+            ),
+          ),
+      ]..sort((a, b) => b.$2.compareTo(a.$2));
+      if (ranked.isNotEmpty &&
+          ranked.first.$2 >= 70 &&
+          (ranked.length == 1 || ranked[1].$2 < ranked.first.$2)) {
+        ep = ranked.first.$1;
+      }
+    }
+    // Missing, duplicate and unresolved special rows deliberately fall back
+    // to /match; the batch scraper never silently selects one candidate.
+    if (ep == null) return null;
+
+    return DanmakuEpisodeRef(
+      animeId: anime.animeId,
+      episodeId: ep.episodeId,
+      animeTitle: anime.animeTitle,
+      episodeTitle: ep.episodeTitle,
+    );
+  }
+
+  int? _seasonFromTitle(String title) {
+    final m = RegExp(
+      r'(?:\bS(?:eason)?\s*0*(\d+)\b)|(?:第\s*(\d+)\s*[季部])',
+      caseSensitive: false,
+    ).firstMatch(title);
+    if (m == null) return null;
+    return int.tryParse(m.group(1) ?? m.group(2) ?? '');
+  }
+
+  /// Serialises request starts so the source sees ≥[minRequestGap] between
+  /// them (PRD: 同一 source 请求间隔 300~500ms; clamped to that window).
+  Future<void> _pace() async {
+    final gap = minRequestGap < const Duration(milliseconds: 300)
+        ? const Duration(milliseconds: 300)
+        : (minRequestGap > const Duration(milliseconds: 500)
+              ? const Duration(milliseconds: 500)
+              : minRequestGap);
+    final now = DateTime.now();
+    final last = _lastRequest;
+    if (last != null) {
+      final elapsed = now.difference(last);
+      if (elapsed < gap) {
+        await Future<void>.delayed(gap - elapsed);
+      }
+    }
+    _lastRequest = DateTime.now();
+  }
+
+  DateTime? _lastRequest;
+
+  /// Retry wrapper: retryable exceptions (429/5xx/timeout) get exponential
+  /// backoff up to [maxRetries]; non-retryable fail immediately. After the
+  /// last attempt the last exception is rethrown.
+  Future<T> _withRetry<T>(
+    Future<T> Function() op, {
+    required DanmakuCancelToken cancelToken,
+  }) async {
+    var attempt = 0;
+    while (true) {
+      if (cancelToken.isCancelled) {
+        throw const DanmakuScrapeException('刮削已取消');
+      }
+      try {
+        return await op();
+      } on DanmakuScrapeException catch (e) {
+        if (!e.retryable || attempt >= maxRetries) rethrow;
+        await _waitForRetry(_backoffFor(attempt), cancelToken);
+        attempt++;
+      } on Exception {
+        // Unknown network-layer exception (SocketException, TimeoutException…)
+        // — treat like a retryable failure.
+        if (attempt >= maxRetries) {
+          throw const DanmakuScrapeException('网络请求失败');
+        }
+        await _waitForRetry(_backoffFor(attempt), cancelToken);
+        attempt++;
+      }
+    }
+  }
+
+  Future<void> _waitForRetry(
+    Duration delay,
+    DanmakuCancelToken cancelToken,
+  ) async {
+    await Future.any<void>([
+      Future<void>.delayed(delay),
+      cancelToken.whenCancelled,
+    ]);
+    if (cancelToken.isCancelled) {
+      throw const DanmakuScrapeException('刮削已取消');
+    }
+  }
+
+  Duration _backoffFor(int attempt) {
+    final ms = backoffBase.inMilliseconds * (1 << attempt);
+    return Duration(milliseconds: ms.clamp(0, backoffMax.inMilliseconds));
+  }
+}

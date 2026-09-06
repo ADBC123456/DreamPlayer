@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 
 import '../utils/tv_helper.dart';
 import 'tv_text_field.dart';
+import '../l10n/app_localizations.dart';
 
 /// Shared visual language for the network-source dialogs (Jellyfin, WebDAV,
 /// SMB): shaped AlertDialog, icon-badge title, rounded icon-prefixed fields,
@@ -61,16 +62,18 @@ class ServerDialogTitle extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
+              AppText(
                 title,
-                style: theme.textTheme.titleMedium
-                    ?.copyWith(fontWeight: FontWeight.w600),
+                style: theme.textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w600,
+                ),
               ),
               if (subtitle != null)
-                Text(
+                AppText(
                   subtitle!,
-                  style: theme.textTheme.bodySmall
-                      ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
                   overflow: TextOverflow.ellipsis,
                 ),
             ],
@@ -92,17 +95,20 @@ InputDecoration serverFieldDecoration(
 }) {
   final theme = Theme.of(context);
   OutlineInputBorder border(Color color) => OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
-        borderSide: BorderSide(color: color),
-      );
+    borderRadius: BorderRadius.circular(12),
+    borderSide: BorderSide(color: color),
+  );
   return InputDecoration(
-    labelText: optional ? '$label (optional)' : label,
-    hintText: hint,
+    labelText: optional
+        ? '${context.tr(label)}（${context.tr('optional')}）'
+        : context.tr(label),
+    hintText: hint == null ? null : context.tr(hint),
     prefixIcon: Icon(icon, size: 20),
     suffixIcon: suffix,
     filled: true,
-    fillColor:
-        theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.35),
+    fillColor: theme.colorScheme.surfaceContainerHighest.withValues(
+      alpha: 0.35,
+    ),
     contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
     border: border(theme.colorScheme.outline.withValues(alpha: 0.4)),
     enabledBorder: border(theme.colorScheme.outline.withValues(alpha: 0.4)),
@@ -143,7 +149,9 @@ class ServerTextField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android && isTvMode(context)) {
+    if (!kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.android &&
+        isTvMode(context)) {
       return TvTextField(
         controller: controller,
         decoration: decoration,
@@ -190,8 +198,7 @@ class ServerResultBanner extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final color =
-        success ? const Color(0xFF4CAF50) : theme.colorScheme.error;
+    final color = success ? const Color(0xFF4CAF50) : theme.colorScheme.error;
     return Container(
       margin: margin ?? const EdgeInsets.only(top: 12),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -209,7 +216,7 @@ class ServerResultBanner extends StatelessWidget {
           ),
           const SizedBox(width: 8),
           Expanded(
-            child: Text(
+            child: AppText(
               message,
               style: TextStyle(
                 fontSize: 13,

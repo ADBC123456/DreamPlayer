@@ -8,6 +8,7 @@ import '../widgets/server_form_kit.dart';
 import '../widgets/tv_overscan.dart';
 import '../widgets/tv_tile.dart';
 import 'tmd_details_screen.dart';
+import '../l10n/app_localizations.dart';
 
 /// Jellyfin / Emby browser: saved + discovered servers -> libraries -> folders
 /// -> play. Playback streams the direct-play URL (token as `api_key` query
@@ -118,8 +119,10 @@ class _JellyfinScreenState extends State<JellyfinScreen> {
           : await _client.getItems(server, _crumbs.last.parentId);
       if (!mounted) return;
       // Folders first, then playables, each sorted by name.
-      final folders = items.where((i) => i.isFolder).toList()..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
-      final playables = items.where((i) => i.isPlayable).toList()..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+      final folders = items.where((i) => i.isFolder).toList()
+        ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+      final playables = items.where((i) => i.isPlayable).toList()
+        ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
       setState(() {
         _items = [...folders, ...playables];
         _loading = false;
@@ -151,8 +154,7 @@ class _JellyfinScreenState extends State<JellyfinScreen> {
   TmdMeta? _tmdbFor(JellyfinItem item) {
     final server = _browsing;
     if (server == null || item.isFolder) return null;
-    return TmdService.instance
-        .metaFor(_client.resumeKey(server, item));
+    return TmdService.instance.metaFor(_client.resumeKey(server, item));
   }
 
   Future<void> _handleSessionExpired() async {
@@ -232,7 +234,7 @@ class _JellyfinScreenState extends State<JellyfinScreen> {
     await LibraryFoldersStore.add(folder);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('"${item.name}" added to your library')),
+      SnackBar(content: AppText('"${item.name}" added to your library')),
     );
     // Fetch the series' own info from the server in the background so the home
     // card + details screen have the main poster/title/year/overview instantly.
@@ -275,14 +277,14 @@ class _JellyfinScreenState extends State<JellyfinScreen> {
       );
       await _replaceServer(authed);
       if (!mounted) return null;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Signed in to ${authed.name}')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: AppText('Signed in to ${authed.name}')));
       return authed;
     } on Exception catch (e) {
       if (!mounted) return null;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(JellyfinClient.friendlyError(e))),
+        SnackBar(content: AppText(JellyfinClient.friendlyError(e))),
       );
       return null;
     }
@@ -307,17 +309,19 @@ class _JellyfinScreenState extends State<JellyfinScreen> {
     if (!mounted) return;
     ScaffoldMessenger.of(
       context,
-    ).showSnackBar(SnackBar(content: Text('Removed ${server.name}')));
+    ).showSnackBar(SnackBar(content: AppText('Removed ${server.name}')));
   }
 
   void _addServer() => _showServerDialog();
 
-  void _editServer(JellyfinServer server) => _showServerDialog(existing: server);
+  void _editServer(JellyfinServer server) =>
+      _showServerDialog(existing: server);
 
   void _showServerDialog({JellyfinServer? existing}) {
     showDialog<void>(
       context: context,
-      builder: (_) => _ServerFormDialog(existing: existing, onSave: _loadServers),
+      builder: (_) =>
+          _ServerFormDialog(existing: existing, onSave: _loadServers),
     );
   }
 
@@ -330,10 +334,12 @@ class _JellyfinScreenState extends State<JellyfinScreen> {
     final browsing = _browsing;
     return Scaffold(
       appBar: AppBar(
-        title: Text(browsing == null ? 'Jellyfin' : _breadcrumbTitle(browsing)),
+        title: AppText(
+          browsing == null ? 'Jellyfin' : _breadcrumbTitle(browsing),
+        ),
         leading: browsing != null
             ? IconButton(
-                tooltip: 'Up',
+                tooltip: context.tr('Up'),
                 icon: const Icon(Icons.arrow_back),
                 onPressed: _goUp,
               )
@@ -341,7 +347,7 @@ class _JellyfinScreenState extends State<JellyfinScreen> {
         actions: [
           if (browsing != null)
             IconButton(
-              tooltip: 'Server list',
+              tooltip: context.tr('Server list'),
               icon: const Icon(Icons.dns_outlined),
               onPressed: () => setState(() {
                 _browsing = null;
@@ -368,21 +374,21 @@ class _JellyfinScreenState extends State<JellyfinScreen> {
                   FloatingActionButton(
                     heroTag: 'jellyfin_scan',
                     onPressed: _scanNetwork,
-                    tooltip: 'Scan network',
+                    tooltip: context.tr('Scan network'),
                     child: const Icon(Icons.wifi_find),
                   ),
                 const SizedBox(height: 12),
                 FloatingActionButton(
                   heroTag: 'jellyfin_refresh',
                   onPressed: _loadServers,
-                  tooltip: 'Refresh',
+                  tooltip: context.tr('Refresh'),
                   child: const Icon(Icons.refresh),
                 ),
                 const SizedBox(height: 12),
                 FloatingActionButton(
                   heroTag: 'jellyfin_add',
                   onPressed: _addServer,
-                  tooltip: 'Add server',
+                  tooltip: context.tr('Add server'),
                   child: const Icon(Icons.add),
                 ),
               ],
@@ -409,7 +415,7 @@ class _JellyfinScreenState extends State<JellyfinScreen> {
               children: [
                 const Icon(Icons.cloud_off_outlined, size: 64),
                 const SizedBox(height: 16),
-                Text(
+                AppText(
                   'Error: $_error',
                   textAlign: TextAlign.center,
                   style: TextStyle(color: Theme.of(context).colorScheme.error),
@@ -417,7 +423,7 @@ class _JellyfinScreenState extends State<JellyfinScreen> {
                 const SizedBox(height: 16),
                 FilledButton(
                   onPressed: _atBrowseRoot ? _loadServers : _goUp,
-                  child: const Text('Retry'),
+                  child: const AppText('Retry'),
                 ),
               ],
             ),
@@ -430,7 +436,7 @@ class _JellyfinScreenState extends State<JellyfinScreen> {
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(24),
-          child: Text(
+          child: AppText(
             'Nothing here',
             textAlign: TextAlign.center,
             style: Theme.of(context).textTheme.titleMedium,
@@ -446,8 +452,7 @@ class _JellyfinScreenState extends State<JellyfinScreen> {
           item: item,
           tmdbMeta: _tmdbFor(item),
           onTap: () => _openItem(item),
-          onAddToLibrary:
-              item.isFolder ? () => _addToLibrary(item) : null,
+          onAddToLibrary: item.isFolder ? () => _addToLibrary(item) : null,
         );
       },
     );
@@ -461,10 +466,7 @@ class _JellyfinScreenState extends State<JellyfinScreen> {
           children: [
             Icon(Icons.live_tv_outlined, size: 48, color: Colors.white38),
             SizedBox(height: 12),
-            Text(
-              'Nothing yet',
-              style: TextStyle(color: Colors.white54),
-            ),
+            AppText('Nothing yet', style: TextStyle(color: Colors.white54)),
           ],
         ),
       );
@@ -478,8 +480,12 @@ class _JellyfinScreenState extends State<JellyfinScreen> {
           for (final server in _servers)
             TvTile(
               leading: const Icon(Icons.live_tv),
-              title: Text(server.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-              subtitle: Text(
+              title: AppText(
+                server.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              subtitle: AppText(
                 server.isAuthenticated
                     ? '${server.url} · Signed in as ${server.username}'
                     : '${server.url} · Not signed in',
@@ -495,8 +501,8 @@ class _JellyfinScreenState extends State<JellyfinScreen> {
                   }
                 },
                 itemBuilder: (_) => const [
-                  PopupMenuItem(value: 'edit', child: Text('Edit')),
-                  PopupMenuItem(value: 'delete', child: Text('Delete')),
+                  PopupMenuItem(value: 'edit', child: AppText('Edit')),
+                  PopupMenuItem(value: 'delete', child: AppText('Delete')),
                 ],
               ),
               onTap: () => _openServer(server),
@@ -506,7 +512,7 @@ class _JellyfinScreenState extends State<JellyfinScreen> {
           TvTile(
             dense: true,
             leading: const Icon(Icons.wifi_find, size: 20),
-            title: Text(_scanning ? 'Scanning\u2026' : 'Scan local network'),
+            title: AppText(_scanning ? 'Scanning\u2026' : 'Scan local network'),
             trailing: _scanning
                 ? const SizedBox(
                     width: 16,
@@ -520,8 +526,16 @@ class _JellyfinScreenState extends State<JellyfinScreen> {
           for (final server in _discovered)
             TvTile(
               leading: const Icon(Icons.radar),
-              title: Text(server.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-              subtitle: Text(server.url, maxLines: 1, overflow: TextOverflow.ellipsis),
+              title: AppText(
+                server.name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              subtitle: AppText(
+                server.url,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
               onTap: () => _openServer(server),
             ),
         ],
@@ -539,12 +553,12 @@ class _SectionHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
-      child: Text(
+      child: AppText(
         label,
         style: Theme.of(context).textTheme.labelLarge?.copyWith(
-              color: Theme.of(context).colorScheme.primary,
-              fontWeight: FontWeight.w600,
-            ),
+          color: Theme.of(context).colorScheme.primary,
+          fontWeight: FontWeight.w600,
+        ),
       ),
     );
   }
@@ -577,15 +591,15 @@ class _JellyfinTile extends StatelessWidget {
       leading: posterUrl != null
           ? _Poster(posterUrl: posterUrl)
           : Icon(icon, color: color),
-      title: Text(item.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-      subtitle: subtitle == null ? null : Text(subtitle),
+      title: AppText(item.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+      subtitle: subtitle == null ? null : AppText(subtitle),
       trailing: item.isFolder
           ? Row(
               mainAxisSize: MainAxisSize.min,
               children: [
                 if (onAddToLibrary != null)
                   IconButton(
-                    tooltip: 'Add to library',
+                    tooltip: context.tr('Add to library'),
                     icon: const Icon(Icons.library_add_outlined),
                     onPressed: onAddToLibrary,
                   ),
@@ -700,8 +714,7 @@ class _ServerFormDialogState extends State<_ServerFormDialog> {
       setState(() {
         _testing = false;
         _resultSuccess = true;
-        _resultMessage =
-            'Connected — ${info.serverName} (${info.version})';
+        _resultMessage = 'Connected — ${info.serverName} (${info.version})';
       });
     } on Exception catch (e) {
       if (!mounted) return;
@@ -843,9 +856,11 @@ class _ServerFormDialogState extends State<_ServerFormDialog> {
                       controlAffinity: ListTileControlAffinity.leading,
                       dense: true,
                       activeThumbColor: theme.colorScheme.primary,
-                      title: const Text('Self-signed certificate',
-                          style: TextStyle(fontSize: 14)),
-                      subtitle: const Text(
+                      title: const AppText(
+                        'Self-signed certificate',
+                        style: TextStyle(fontSize: 14),
+                      ),
+                      subtitle: const AppText(
                         'Trust HTTPS servers without a CA certificate',
                         style: TextStyle(fontSize: 12),
                       ),
@@ -869,8 +884,9 @@ class _ServerFormDialogState extends State<_ServerFormDialog> {
         OutlinedButton.icon(
           style: OutlinedButton.styleFrom(
             side: BorderSide(color: theme.colorScheme.outline),
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
           ),
           onPressed: _testing ? null : _test,
           icon: _testing
@@ -880,20 +896,21 @@ class _ServerFormDialogState extends State<_ServerFormDialog> {
                   child: CircularProgressIndicator(strokeWidth: 2),
                 )
               : const Icon(Icons.wifi_tethering, size: 16),
-          label: const Text('Test'),
+          label: const AppText('Test'),
         ),
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
+          child: const AppText('Cancel'),
         ),
         FilledButton.icon(
           style: FilledButton.styleFrom(
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
           ),
           onPressed: _testing ? null : _save,
           icon: const Icon(Icons.check_rounded, size: 16),
-          label: const Text('Save'),
+          label: const AppText('Save'),
         ),
       ],
     );
@@ -978,20 +995,26 @@ class _LoginDialogState extends State<_LoginDialog> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 8,
+                ),
                 decoration: BoxDecoration(
-                  color: theme.colorScheme.surfaceContainerHighest
-                      .withValues(alpha: 0.35),
+                  color: theme.colorScheme.surfaceContainerHighest.withValues(
+                    alpha: 0.35,
+                  ),
                   borderRadius: BorderRadius.circular(10),
                 ),
                 child: Row(
                   children: [
-                    Icon(Icons.dns_outlined,
-                        size: 15, color: theme.colorScheme.onSurfaceVariant),
+                    Icon(
+                      Icons.dns_outlined,
+                      size: 15,
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
                     const SizedBox(width: 8),
                     Expanded(
-                      child: Text(
+                      child: AppText(
                         widget.url,
                         style: TextStyle(
                           fontSize: 12.5,
@@ -1029,11 +1052,14 @@ class _LoginDialogState extends State<_LoginDialog> {
                   padding: const EdgeInsets.only(top: 12),
                   child: Row(
                     children: [
-                      Icon(Icons.error_outline,
-                          size: 16, color: theme.colorScheme.error),
+                      Icon(
+                        Icons.error_outline,
+                        size: 16,
+                        color: theme.colorScheme.error,
+                      ),
                       const SizedBox(width: 6),
                       Expanded(
-                        child: Text(
+                        child: AppText(
                           _error!,
                           style: TextStyle(
                             fontSize: 13,
@@ -1052,21 +1078,23 @@ class _LoginDialogState extends State<_LoginDialog> {
       actions: [
         TextButton(
           onPressed: _busy ? null : () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
+          child: const AppText('Cancel'),
         ),
         FilledButton.icon(
           style: FilledButton.styleFrom(
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
           ),
           onPressed: _busy ? null : _submit,
           icon: _busy
               ? const SizedBox(
                   width: 14,
                   height: 14,
-                  child: CircularProgressIndicator(strokeWidth: 2))
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
               : const Icon(Icons.arrow_forward_rounded, size: 16),
-          label: const Text('Sign in'),
+          label: const AppText('Sign in'),
         ),
       ],
     );

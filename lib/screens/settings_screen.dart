@@ -23,6 +23,8 @@ import '../utils/tv_helper.dart';
 import '../widgets/tv_overscan.dart';
 import '../widgets/tv_tile.dart';
 import 'licenses_screen.dart';
+import 'danmaku_settings_screen.dart';
+import '../l10n/app_localizations.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -57,6 +59,41 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _badgeVideoCodec = false;
   bool _badgeSpatialAudio = true;
   bool _badgeServerTranscode = true;
+
+  Future<void> _pickAppLanguage() async {
+    final current = AppLocaleController.instance.locale.languageCode;
+    final picked = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => SimpleDialog(
+        title: AppText('Language'),
+        children: [
+          RadioGroup<String>(
+            groupValue: current,
+            onChanged: (value) => Navigator.pop(dialogContext, value),
+            child: const Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                RadioListTile<String>(
+                  value: 'zh',
+                  title: AppText('Chinese'),
+                  subtitle: AppText('Chinese interface and TMDB metadata'),
+                ),
+                RadioListTile<String>(
+                  value: 'en',
+                  title: AppText('English'),
+                  subtitle: AppText('English interface and TMDB metadata'),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+    if (picked != null) {
+      await AppLocaleController.instance.setLanguage(picked);
+    }
+  }
+
   bool _badgeDecoder = false;
   String _tmdbKey = '';
 
@@ -96,18 +133,40 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final c = OpensubtitlesClient.instance;
     if (!c.hasApiKey) return;
     try {
-      await c.fetchUserInfo().then((info) {
-        final data = info['data'] as Map<String, dynamic>?;
-        final remaining = data?['remaining_downloads'] as int?;
-        if (mounted) setState(() { _osLoggedIn = true; _osUsername = c.username; _osRemaining = remaining; });
-      }).catchError((_) {
-        if (mounted) setState(() { _osLoggedIn = false; _osUsername = null; });
-      });
+      await c
+          .fetchUserInfo()
+          .then((info) {
+            final data = info['data'] as Map<String, dynamic>?;
+            final remaining = data?['remaining_downloads'] as int?;
+            if (mounted) {
+              setState(() {
+                _osLoggedIn = true;
+                _osUsername = c.username;
+                _osRemaining = remaining;
+              });
+            }
+          })
+          .catchError((_) {
+            if (mounted) {
+              setState(() {
+                _osLoggedIn = false;
+                _osUsername = null;
+              });
+            }
+          });
       if (!c.isLoggedIn && mounted) {
-        setState(() { _osLoggedIn = false; _osUsername = c.username; });
+        setState(() {
+          _osLoggedIn = false;
+          _osUsername = c.username;
+        });
       }
     } catch (_) {
-      if (mounted) setState(() { _osLoggedIn = c.isLoggedIn; _osUsername = c.username; });
+      if (mounted) {
+        setState(() {
+          _osLoggedIn = c.isLoggedIn;
+          _osUsername = c.username;
+        });
+      }
     }
   }
 
@@ -117,7 +176,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final download = await SubtitlePrefs.loadDownloadLanguage();
       final enc = await SubtitlePrefs.loadEncoding();
       final auto = await SubtitlePrefs.loadAutoFetch();
-      if (mounted) setState(() { _readingLang = reading; _downloadLang = download; _subEncoding = enc; _autoFetchSubs = auto; });
+      if (mounted) {
+        setState(() {
+          _readingLang = reading;
+          _downloadLang = download;
+          _subEncoding = enc;
+          _autoFetchSubs = auto;
+        });
+      }
     } catch (_) {}
   }
 
@@ -144,7 +210,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final picked = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text(isReading ? 'Subtitle reading language' : 'Download language'),
+        title: AppText(
+          isReading ? 'Subtitle reading language' : 'Download language',
+        ),
         content: SizedBox(
           width: double.maxFinite,
           height: 360,
@@ -157,13 +225,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 final l = subtitleLanguages[i];
                 return RadioListTile<String>(
                   value: l.novaCode,
-                  title: Text(l.displayName),
+                  title: AppText(l.displayName),
                 );
               },
             ),
           ),
         ),
-        actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel'))],
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const AppText('Cancel'),
+          ),
+        ],
       ),
     );
     if (picked != null) {
@@ -181,7 +254,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final picked = await showDialog<int>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Subtitle encoding'),
+        title: const AppText('Subtitle encoding'),
         content: SizedBox(
           width: double.maxFinite,
           height: 360,
@@ -194,13 +267,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 final e = subtitleEncodings[i];
                 return RadioListTile<int>(
                   value: e.codepage,
-                  title: Text(e.displayName),
+                  title: AppText(e.displayName),
                 );
               },
             ),
           ),
         ),
-        actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel'))],
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const AppText('Cancel'),
+          ),
+        ],
       ),
     );
     if (picked != null) {
@@ -215,32 +293,74 @@ class _SettingsScreenState extends State<SettingsScreen> {
     String? err;
     final ok = await showDialog<bool>(
       context: context,
-      builder: (ctx) => StatefulBuilder(builder: (ctx, setDlg) => AlertDialog(
-        title: const Text('OpenSubtitles sign in'),
-        content: Column(mainAxisSize: MainAxisSize.min, children: [
-          TextField(controller: uCtrl, decoration: const InputDecoration(labelText: 'Username')),
-          TextField(controller: pCtrl, obscureText: true, decoration: const InputDecoration(labelText: 'Password')),
-          if (err != null) Padding(padding: const EdgeInsets.only(top: 8), child: Text(err!, style: const TextStyle(color: Colors.redAccent, fontSize: 12))),
-          const SizedBox(height: 8),
-          const Text('Free account = 20/day (anonymous = 5/day). Create at opensubtitles.com', style: TextStyle(color: Colors.white54, fontSize: 11)),
-        ]),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-          TextButton(onPressed: () async {
-            try {
-              await OpensubtitlesClient.instance.login(username: uCtrl.text.trim(), password: pCtrl.text);
-              if (ctx.mounted) Navigator.pop(ctx, true);
-            } catch (e) { setDlg(() => err = e.toString()); }
-          }, child: const Text('Sign in')),
-        ],
-      )),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDlg) => AlertDialog(
+          title: const AppText('OpenSubtitles sign in'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: uCtrl,
+                decoration: InputDecoration(labelText: context.tr('Username')),
+              ),
+              TextField(
+                controller: pCtrl,
+                obscureText: true,
+                decoration: InputDecoration(labelText: context.tr('Password')),
+              ),
+              if (err != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: AppText(
+                    err!,
+                    style: const TextStyle(
+                      color: Colors.redAccent,
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
+              const SizedBox(height: 8),
+              const AppText(
+                'Free account = 20/day (anonymous = 5/day). Create at opensubtitles.com',
+                style: TextStyle(color: Colors.white54, fontSize: 11),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const AppText('Cancel'),
+            ),
+            TextButton(
+              onPressed: () async {
+                try {
+                  await OpensubtitlesClient.instance.login(
+                    username: uCtrl.text.trim(),
+                    password: pCtrl.text,
+                  );
+                  if (ctx.mounted) Navigator.pop(ctx, true);
+                } catch (e) {
+                  setDlg(() => err = e.toString());
+                }
+              },
+              child: const AppText('Sign in'),
+            ),
+          ],
+        ),
+      ),
     );
     if (ok == true) await _loadOpensubtitles();
   }
 
   Future<void> _logoutOpensubtitles() async {
     await OpensubtitlesClient.instance.logout();
-    if (mounted) setState(() { _osLoggedIn = false; _osUsername = null; _osRemaining = null; });
+    if (mounted) {
+      setState(() {
+        _osLoggedIn = false;
+        _osUsername = null;
+        _osRemaining = null;
+      });
+    }
   }
 
   Future<void> _loadTmdbKey() async {
@@ -253,50 +373,71 @@ class _SettingsScreenState extends State<SettingsScreen> {
     String? err;
     final ok = await showDialog<bool>(
       context: context,
-      builder: (ctx) => StatefulBuilder(builder: (ctx, setDlg) => AlertDialog(
-        title: const Text('TMDB API key'),
-        content: Column(mainAxisSize: MainAxisSize.min, children: [
-          const Text(
-            'Get a free key at themoviedb.org/settings/api',
-            style: TextStyle(color: Colors.white54, fontSize: 12),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDlg) => AlertDialog(
+          title: const AppText('TMDB API key'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const AppText(
+                'Get a free key at themoviedb.org/settings/api',
+                style: TextStyle(color: Colors.white54, fontSize: 12),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: ctrl,
+                decoration: InputDecoration(
+                  labelText: context.tr('API key (v3 auth)'),
+                  hintText: context.tr('32-character hex string'),
+                ),
+              ),
+              if (err != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: AppText(
+                    err!,
+                    style: const TextStyle(
+                      color: Colors.redAccent,
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
+            ],
           ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: ctrl,
-            decoration: const InputDecoration(
-              labelText: 'API key (v3 auth)',
-              hintText: '32-character hex string',
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const AppText('Cancel'),
             ),
-          ),
-          if (err != null) Padding(
-            padding: const EdgeInsets.only(top: 8),
-            child: Text(err!, style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
-          ),
-        ]),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-          if (_tmdbKey.isNotEmpty)
-            TextButton(onPressed: () async {
-              final prefs = await SharedPreferences.getInstance();
-              await prefs.remove(TmdApi.prefsKey);
-              if (ctx.mounted) Navigator.pop(ctx, true);
-            }, child: const Text('Remove')),
-          TextButton(onPressed: () async {
-            final entered = ctrl.text.trim();
-            if (entered.isNotEmpty && entered.length != 32) {
-              setDlg(() => err = 'Key must be 32 characters');
-              return;
-            }
-            final prefs = await SharedPreferences.getInstance();
-            if (entered.isEmpty) {
-              await prefs.remove(TmdApi.prefsKey);
-            } else {
-              await prefs.setString(TmdApi.prefsKey, entered);
-            }
-            if (ctx.mounted) Navigator.pop(ctx, true);
-          }, child: const Text('Save')),
-        ],
-      )),
+            if (_tmdbKey.isNotEmpty)
+              TextButton(
+                onPressed: () async {
+                  final prefs = await SharedPreferences.getInstance();
+                  await prefs.remove(TmdApi.prefsKey);
+                  if (ctx.mounted) Navigator.pop(ctx, true);
+                },
+                child: const AppText('Remove'),
+              ),
+            TextButton(
+              onPressed: () async {
+                final entered = ctrl.text.trim();
+                if (entered.isNotEmpty && entered.length != 32) {
+                  setDlg(() => err = 'Key must be 32 characters');
+                  return;
+                }
+                final prefs = await SharedPreferences.getInstance();
+                if (entered.isEmpty) {
+                  await prefs.remove(TmdApi.prefsKey);
+                } else {
+                  await prefs.setString(TmdApi.prefsKey, entered);
+                }
+                if (ctx.mounted) Navigator.pop(ctx, true);
+              },
+              child: const AppText('Save'),
+            ),
+          ],
+        ),
+      ),
     );
     if (ok == true) await _loadTmdbKey();
   }
@@ -357,8 +498,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Clear cache?'),
-        content: Text(
+        title: const AppText('Clear cache?'),
+        content: AppText(
           'Removes ${CacheCleaner.formatBytes(totalBytes)} of cached images '
           'and temporary files. Posters and details may need to be reloaded '
           'from the network the next time you open them.',
@@ -366,11 +507,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Cancel'),
+            child: const AppText('Cancel'),
           ),
           TextButton(
             onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Clear'),
+            child: const AppText('Clear'),
           ),
         ],
       ),
@@ -382,7 +523,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() => _cleared = true);
     ScaffoldMessenger.of(
       context,
-    ).showSnackBar(const SnackBar(content: Text('Cache cleared')));
+    ).showSnackBar(const SnackBar(content: AppText('Cache cleared')));
     await _refreshDiskSize();
   }
 
@@ -398,7 +539,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
           children: [
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-              child: Text(
+              child: AppText(
+                'General',
+                style: theme.textTheme.titleSmall?.copyWith(
+                  color: theme.colorScheme.primary,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            TvTile(
+              leading: const Icon(Icons.language),
+              title: const AppText('Language'),
+              subtitle: AppText(
+                AppLocaleController.instance.isChinese ? 'Chinese' : 'English',
+              ),
+              onTap: _pickAppLanguage,
+            ),
+            const Divider(),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+              child: AppText(
                 'Support',
                 style: theme.textTheme.titleSmall?.copyWith(
                   color: theme.colorScheme.primary,
@@ -409,8 +569,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             for (final option in supportOptions)
               TvTile(
                 leading: Icon(option.icon),
-                title: Text(option.title),
-                subtitle: Text(option.subtitle),
+                title: AppText(option.title),
+                subtitle: AppText(option.subtitle),
                 trailing: const Icon(Icons.open_in_new, size: 18),
                 onTap: () async {
                   try {
@@ -419,7 +579,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     if (context.mounted) {
                       ScaffoldMessenger.of(context).showSnackBar(
                         const SnackBar(
-                          content: Text('Could not open this link'),
+                          content: AppText('Could not open this link'),
                         ),
                       );
                     }
@@ -429,7 +589,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const Divider(),
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-              child: Text(
+              child: AppText(
                 'Storage',
                 style: theme.textTheme.titleSmall?.copyWith(
                   color: theme.colorScheme.primary,
@@ -439,8 +599,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             TvTile(
               leading: const Icon(Icons.cleaning_services),
-              title: const Text('Clear cache'),
-              subtitle: Text(
+              title: const AppText('Clear cache'),
+              subtitle: AppText(
                 _cleared
                     ? 'Cached images and temporary files cleared'
                     : '${CacheCleaner.formatBytes(_diskBytes)} on disk · '
@@ -452,7 +612,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               const Divider(),
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-                child: Text(
+                child: AppText(
                   'Audio',
                   style: theme.textTheme.titleSmall?.copyWith(
                     color: theme.colorScheme.primary,
@@ -462,8 +622,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
               SwitchListTile(
                 secondary: const Icon(Icons.surround_sound),
-                title: const Text('Audio passthrough'),
-                subtitle: Text(
+                title: const AppText('Audio passthrough'),
+                subtitle: AppText(
                   _passthrough
                       ? 'Auto — passthrough when HDMI detected'
                       : 'Off — decode to PCM (default)',
@@ -480,7 +640,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               const Divider(),
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-                child: Text(
+                child: AppText(
                   'Player',
                   style: theme.textTheme.titleSmall?.copyWith(
                     color: theme.colorScheme.primary,
@@ -490,8 +650,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
               SwitchListTile(
                 secondary: const Icon(Icons.swipe),
-                title: const Text('Swipe gestures'),
-                subtitle: const Text(
+                title: const AppText('Swipe gestures'),
+                subtitle: const AppText(
                   'Swipe left side for brightness, right side for volume',
                 ),
                 value: _swipeGestures,
@@ -510,8 +670,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   defaultTargetPlatform == TargetPlatform.iOS)
                 SwitchListTile(
                   secondary: const Icon(Icons.picture_in_picture),
-                  title: const Text('Picture-in-picture'),
-                  subtitle: const Text(
+                  title: const AppText('Picture-in-picture'),
+                  subtitle: const AppText(
                     'Keep playing in a floating window when you leave the app',
                   ),
                   value: _pipEnabled,
@@ -523,8 +683,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
               SwitchListTile(
                 secondary: const Icon(Icons.skip_next),
-                title: const Text('Auto-play next episode'),
-                subtitle: const Text('Play the next episode when one ends'),
+                title: const AppText('Auto-play next episode'),
+                subtitle: const AppText('Play the next episode when one ends'),
                 value: _autoPlayNext,
                 onChanged: (value) async {
                   final prefs = await SharedPreferences.getInstance();
@@ -534,8 +694,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
               SwitchListTile(
                 secondary: const Icon(Icons.label),
-                title: const Text('On-screen badges'),
-                subtitle: const Text(
+                title: const AppText('On-screen badges'),
+                subtitle: const AppText(
                   'Show format chips on screen while playing',
                 ),
                 value: _badgeEnabled,
@@ -547,7 +707,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               if (_badgeEnabled) ...[
                 Padding(
                   padding: const EdgeInsets.fromLTRB(56, 8, 16, 4),
-                  child: Text(
+                  child: AppText(
                     'Format',
                     style: theme.textTheme.labelSmall?.copyWith(
                       color: theme.colorScheme.primary,
@@ -596,7 +756,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(56, 8, 16, 4),
-                  child: Text(
+                  child: AppText(
                     'Playback',
                     style: theme.textTheme.labelSmall?.copyWith(
                       color: theme.colorScheme.primary,
@@ -641,8 +801,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               if (defaultTargetPlatform == TargetPlatform.android) ...[
                 TvTile(
                   leading: const Icon(Icons.volume_up),
-                  title: const Text('Volume Boost'),
-                  subtitle: Text(
+                  title: const AppText('Volume Boost'),
+                  subtitle: AppText(
                     _audioBoost > 1.01
                         ? '${_audioBoost.toStringAsFixed(1)}× (LoudnessEnhancer)'
                         : 'Off — 1.0×',
@@ -652,7 +812,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     final picked = await showDialog<double>(
                       context: context,
                       builder: (context) => AlertDialog(
-                        title: const Text('Volume Boost'),
+                        title: const AppText('Volume Boost'),
                         content: StatefulBuilder(
                           builder: (context, setD) => Column(
                             mainAxisSize: MainAxisSize.min,
@@ -668,7 +828,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                       temp = double.parse(v.toStringAsFixed(1)),
                                 ),
                               ),
-                              Text(
+                              AppText(
                                 '${temp.toStringAsFixed(1)}×',
                                 style: Theme.of(context).textTheme.bodySmall,
                               ),
@@ -678,11 +838,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         actions: [
                           TextButton(
                             onPressed: () => Navigator.pop(context),
-                            child: const Text('Cancel'),
+                            child: const AppText('Cancel'),
                           ),
                           TextButton(
                             onPressed: () => Navigator.pop(context, temp),
-                            child: const Text('Save'),
+                            child: const AppText('Save'),
                           ),
                         ],
                       ),
@@ -695,8 +855,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
                 SwitchListTile(
                   secondary: const Icon(Icons.nights_stay),
-                  title: const Text('Night Mode'),
-                  subtitle: const Text(
+                  title: const AppText('Night Mode'),
+                  subtitle: const AppText(
                     'Compress dynamic range for quiet listening',
                   ),
                   value: _nightMode,
@@ -709,8 +869,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               if (defaultTargetPlatform == TargetPlatform.android)
                 TvTile(
                   leading: const Icon(Icons.memory),
-                  title: const Text('Video decoder'),
-                  subtitle: Text(switch (_decoderMode) {
+                  title: const AppText('Video decoder'),
+                  subtitle: AppText(switch (_decoderMode) {
                     DecoderMode.hw => 'Hardware — fastest, HDR passthrough',
                     DecoderMode.sw => 'Software — compatibility fallback',
                     _ => 'Auto — hardware when available',
@@ -719,7 +879,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     final picked = await showDialog<DecoderMode>(
                       context: context,
                       builder: (context) => SimpleDialog(
-                        title: const Text('Video decoder'),
+                        title: const AppText('Video decoder'),
                         children: [
                           RadioGroup<DecoderMode>(
                             groupValue: _decoderMode,
@@ -730,8 +890,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                                 for (final m in DecoderMode.values)
                                   RadioListTile<DecoderMode>(
                                     value: m,
-                                    title: Text(m.label),
-                                    subtitle: Text(switch (m) {
+                                    title: AppText(m.label),
+                                    subtitle: AppText(switch (m) {
                                       DecoderMode.hw =>
                                         'Force hardware decoders',
                                       DecoderMode.sw =>
@@ -752,23 +912,53 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       if (!context.mounted) return;
                       ScaffoldMessenger.of(context).showSnackBar(
                         const SnackBar(
-                          content: Text('Takes effect on next video'),
+                          content: AppText('Takes effect on next video'),
                         ),
                       );
                     }
                   },
                 ),
             ],
+            const Divider(),
+            Padding(
+              padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
+              child: AppText(
+                'Danmaku',
+                style: TextStyle(
+                  color: Colors.purpleAccent,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 12,
+                ),
+              ),
+            ),
+            TvTile(
+              leading: const Icon(Icons.forum_outlined),
+              title: const AppText('Danmaku settings'),
+              subtitle: const AppText('Sources, filters and appearance'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => const DanmakuSettingsScreen(),
+                ),
+              ),
+            ),
             // Subtitles — OpenSubtitles (Nova-style): anonymous 5/day, free login 20/day
             const Divider(),
             Padding(
               padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
-              child: Text('Metadata', style: TextStyle(color: Colors.purpleAccent, fontWeight: FontWeight.w600, fontSize: 12)),
+              child: AppText(
+                'Metadata',
+                style: TextStyle(
+                  color: Colors.purpleAccent,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 12,
+                ),
+              ),
             ),
             TvTile(
               leading: const Icon(Icons.movie),
-              title: const Text('TMDB API key'),
-              subtitle: Text(
+              title: const AppText('TMDB API key'),
+              subtitle: AppText(
                 _tmdbKey.isEmpty
                     ? 'Not set — enter your own key'
                     : 'Set (${_tmdbKey.substring(0, 4)}…${_tmdbKey.substring(_tmdbKey.length - 4)})',
@@ -778,46 +968,55 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const Divider(),
             Padding(
               padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
-              child: Text('Subtitles', style: TextStyle(color: Colors.purpleAccent, fontWeight: FontWeight.w600, fontSize: 12)),
+              child: AppText(
+                'Subtitles',
+                style: TextStyle(
+                  color: Colors.purpleAccent,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 12,
+                ),
+              ),
             ),
             TvTile(
               leading: const Icon(Icons.subtitles),
-              title: const Text('OpenSubtitles'),
-              subtitle: Text(
+              title: const AppText('OpenSubtitles'),
+              subtitle: AppText(
                 !OpensubtitlesClient.instance.hasApiKey
                     ? 'Add OPENSUBTITLES_API_KEY in .env and rebuild'
                     : _osLoggedIn
-                        ? 'Signed in as ${_osUsername ?? ''}${_osRemaining != null ? ' · $_osRemaining remaining' : ''}'
-                        : 'Anonymous — 5/day, sign in for 20/day',
+                    ? 'Signed in as ${_osUsername ?? ''}${_osRemaining != null ? ' · $_osRemaining remaining' : ''}'
+                    : 'Anonymous — 5/day, sign in for 20/day',
               ),
               onTap: !OpensubtitlesClient.instance.hasApiKey
                   ? null
                   : _osLoggedIn
-                      ? _logoutOpensubtitles
-                      : _loginOpensubtitles,
+                  ? _logoutOpensubtitles
+                  : _loginOpensubtitles,
             ),
             TvTile(
               leading: const Icon(Icons.closed_caption),
-              title: const Text('Subtitle reading language'),
-              subtitle: Text(displayNameForNovaCode(_readingLang)),
+              title: const AppText('Subtitle reading language'),
+              subtitle: AppText(displayNameForNovaCode(_readingLang)),
               onTap: () => _pickLanguage(isReading: true),
             ),
             TvTile(
               leading: const Icon(Icons.download),
-              title: const Text('Subtitle download language'),
-              subtitle: Text(displayNameForNovaCode(_downloadLang)),
+              title: const AppText('Subtitle download language'),
+              subtitle: AppText(displayNameForNovaCode(_downloadLang)),
               onTap: () => _pickLanguage(isReading: false),
             ),
             TvTile(
               leading: const Icon(Icons.text_fields),
-              title: const Text('Subtitle encoding'),
-              subtitle: Text(displayNameForCodepage(_subEncoding)),
+              title: const AppText('Subtitle encoding'),
+              subtitle: AppText(displayNameForCodepage(_subEncoding)),
               onTap: _pickEncoding,
             ),
             SwitchListTile(
               secondary: const Icon(Icons.auto_awesome),
-              title: const Text('Auto-fetch subtitles'),
-              subtitle: const Text('Download best match when no subtitles found'),
+              title: const AppText('Auto-fetch subtitles'),
+              subtitle: const AppText(
+                'Download best match when no subtitles found',
+              ),
               value: _autoFetchSubs,
               onChanged: (v) async {
                 await SubtitlePrefs.saveAutoFetch(v);
@@ -828,7 +1027,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               const Divider(),
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-                child: Text(
+                child: AppText(
                   'SIMKL',
                   style: theme.textTheme.titleSmall?.copyWith(
                     color: theme.colorScheme.primary,
@@ -839,8 +1038,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               if (_simklConnected) ...[
                 TvTile(
                   leading: const Icon(Icons.sync),
-                  title: const Text('Sync now'),
-                  subtitle: Text(
+                  title: const AppText('Sync now'),
+                  subtitle: AppText(
                     _simklLastSync == null
                         ? 'Push watched + resume to SIMKL'
                         : 'Last synced ${_formatWhen(_simklLastSync!)}',
@@ -849,8 +1048,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
                 TvTile(
                   leading: const Icon(Icons.link_off),
-                  title: const Text('Disconnect SIMKL'),
-                  subtitle: const Text('Sign out and stop syncing'),
+                  title: const AppText('Disconnect SIMKL'),
+                  subtitle: const AppText('Sign out and stop syncing'),
                   onTap: () async {
                     await SimklClient().signOut();
                     if (mounted) {
@@ -864,15 +1063,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ] else
                 TvTile(
                   leading: const Icon(Icons.link),
-                  title: const Text('Connect SIMKL'),
-                  subtitle: const Text('Sync watched history with simkl.com (free unlimited)'),
+                  title: const AppText('Connect SIMKL'),
+                  subtitle: const AppText(
+                    'Sync watched history with simkl.com (free unlimited)',
+                  ),
                   onTap: _connectSimkl,
                 ),
             ],
             const Divider(),
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-              child: Text(
+              child: AppText(
                 'About',
                 style: theme.textTheme.titleSmall?.copyWith(
                   color: theme.colorScheme.primary,
@@ -882,8 +1083,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             TvTile(
               leading: const Icon(Icons.memory),
-              title: const Text('Engine'),
-              subtitle: Text(
+              title: const AppText('Engine'),
+              subtitle: AppText(
                 defaultTargetPlatform == TargetPlatform.iOS
                     ? 'AetherEngine (AVPlayer + FFmpeg)'
                     : 'ExoPlayer (Media3) + FFmpeg',
@@ -891,17 +1092,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             TvTile(
               leading: const Icon(Icons.info_outline),
-              title: const Text('Version'),
+              title: const AppText('Version'),
               subtitle: FutureBuilder<String>(
                 future: _loadVersion(),
                 builder: (context, snapshot) =>
-                    Text(snapshot.hasData ? snapshot.data! : '…'),
+                    AppText(snapshot.hasData ? snapshot.data! : '…'),
               ),
             ),
             TvTile(
               leading: const Icon(Icons.gavel),
-              title: const Text('Open-source licenses'),
-              subtitle: const Text('GNU GPL v3.0 and third-party notices'),
+              title: const AppText('Open-source licenses'),
+              subtitle: const AppText('GNU GPL v3.0 and third-party notices'),
               onTap: () {
                 Navigator.of(context).push(
                   MaterialPageRoute<void>(
@@ -915,14 +1116,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
               padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
               child: Column(
                 children: [
-                  Text(
+                  AppText(
                     'Made with ❤️ by Mangesh Ghodke',
                     style: theme.textTheme.bodySmall?.copyWith(
                       color: theme.colorScheme.onSurfaceVariant,
                     ),
                   ),
                   const SizedBox(height: 4),
-                  Text(
+                  AppText(
                     'DreamPlayer',
                     style: theme.textTheme.bodySmall?.copyWith(
                       color: theme.colorScheme.outline,
@@ -968,7 +1169,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
       await _loadSimkl();
     } on SimklException catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: AppText(e.message)));
       }
     }
   }
@@ -981,10 +1184,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
       await client.markWatched(items);
       if (mounted) {
         setState(() => _simklLastSync = DateTime.now());
-        messenger.showSnackBar(SnackBar(content: Text('Synced ${items.length} item(s) to SIMKL')));
+        messenger.showSnackBar(
+          SnackBar(content: AppText('Synced ${items.length} item(s) to SIMKL')),
+        );
       }
     } on SimklException catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text(e.message)));
+      messenger.showSnackBar(SnackBar(content: AppText(e.message)));
     }
   }
 
@@ -1046,16 +1251,16 @@ class _SimklConnectDialogState extends State<_SimklConnectDialog> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return AlertDialog(
-      title: const Text('Connect SIMKL'),
+      title: const AppText('Connect SIMKL'),
       content: SingleChildScrollView(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Go to the address below and enter this code:'),
+            const AppText('Go to the address below and enter this code:'),
             const SizedBox(height: 12),
             Center(
-              child: Text(
+              child: AppText(
                 widget.code.userCode,
                 style: theme.textTheme.headlineMedium?.copyWith(
                   letterSpacing: 4,
@@ -1065,23 +1270,34 @@ class _SimklConnectDialogState extends State<_SimklConnectDialog> {
             ),
             const SizedBox(height: 12),
             Center(
-              child: Text(
+              child: AppText(
                 widget.code.verificationUrl,
-                style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.primary),
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: theme.colorScheme.primary,
+                ),
               ),
             ),
             const SizedBox(height: 16),
             Row(
               children: [
-                const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+                const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
                 const SizedBox(width: 12),
-                Expanded(child: Text(_status)),
+                Expanded(child: AppText(_status)),
               ],
             ),
           ],
         ),
       ),
-      actions: [TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Cancel'))],
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const AppText('Cancel'),
+        ),
+      ],
     );
   }
 }
@@ -1111,10 +1327,14 @@ class _BadgeToggle extends StatelessWidget {
       child: ListTile(
         dense: true,
         visualDensity: VisualDensity.compact,
-        leading: Icon(icon, size: 18, color: theme.colorScheme.onSurfaceVariant),
-        title: Text(label, style: const TextStyle(fontSize: 14)),
+        leading: Icon(
+          icon,
+          size: 18,
+          color: theme.colorScheme.onSurfaceVariant,
+        ),
+        title: AppText(label, style: const TextStyle(fontSize: 14)),
         subtitle: subtitle != null
-            ? Text(subtitle!, style: const TextStyle(fontSize: 11))
+            ? AppText(subtitle!, style: const TextStyle(fontSize: 11))
             : null,
         trailing: Switch.adaptive(
           value: value,

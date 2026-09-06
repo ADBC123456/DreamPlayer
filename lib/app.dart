@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 
 import 'screens/home_screen.dart';
 import 'screens/player_screen.dart';
@@ -8,6 +9,7 @@ import 'models/video_item.dart';
 import 'services/jellyfin_client.dart';
 import 'services/open_intent.dart';
 import 'theme/app_theme.dart';
+import 'l10n/app_localizations.dart';
 
 /// Used by the "Open with" intent handler to navigate without a BuildContext.
 final GlobalKey<NavigatorState> appNavigatorKey = GlobalKey<NavigatorState>();
@@ -28,7 +30,16 @@ class _DreamPlayerAppState extends State<DreamPlayerApp> {
   @override
   void initState() {
     super.initState();
+    AppLocaleController.instance.addListener(_languageChanged);
     _listenForIntents();
+  }
+
+  void _languageChanged() => setState(() {});
+
+  @override
+  void dispose() {
+    AppLocaleController.instance.removeListener(_languageChanged);
+    super.dispose();
   }
 
   Future<void> _listenForIntents() async {
@@ -75,6 +86,13 @@ class _DreamPlayerAppState extends State<DreamPlayerApp> {
       title: 'DreamPlayer',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.dark(),
+      locale: AppLocaleController.instance.locale,
+      supportedLocales: const [Locale('zh'), Locale('en')],
+      localizationsDelegates: const [
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
       navigatorKey: appNavigatorKey,
       navigatorObservers: [appRouteObserver],
       builder: (context, child) {
@@ -130,7 +148,7 @@ class _RootShellState extends State<RootShell> {
         ..hideCurrentSnackBar()
         ..showSnackBar(
           const SnackBar(
-            content: Text('Press back again to exit'),
+            content: AppText('Press back again to exit'),
             duration: Duration(seconds: 2),
           ),
         );
@@ -174,16 +192,16 @@ class _RootShellState extends State<RootShell> {
             });
             if (index == 0) _homeRefreshTick.value++;
           },
-          destinations: const [
+          destinations: [
             NavigationDestination(
-              icon: Icon(Icons.video_library_outlined),
-              selectedIcon: Icon(Icons.video_library),
-              label: 'Library',
+              icon: const Icon(Icons.video_library_outlined),
+              selectedIcon: const Icon(Icons.video_library),
+              label: context.tr('Library'),
             ),
             NavigationDestination(
-              icon: Icon(Icons.settings_outlined),
-              selectedIcon: Icon(Icons.settings),
-              label: 'Settings',
+              icon: const Icon(Icons.settings_outlined),
+              selectedIcon: const Icon(Icons.settings),
+              label: context.tr('Settings'),
             ),
           ],
         ),

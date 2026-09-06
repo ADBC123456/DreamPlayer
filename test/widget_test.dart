@@ -12,54 +12,59 @@ void main() {
   testWidgets('App shows library and settings shell', (tester) async {
     await tester.pumpWidget(const DreamPlayerApp());
 
-    expect(find.text('DreamPlayer'), findsOneWidget);
-    expect(find.text('Continue watching'), findsOneWidget);
-    expect(find.text('Nothing yet'), findsOneWidget);
-    expect(find.text('Library'), findsOneWidget);
-    expect(find.text('Settings'), findsOneWidget);
+    expect(find.text('影视库'), findsOneWidget);
+    expect(find.text('继续观看'), findsOneWidget);
+    expect(find.text('暂无内容'), findsOneWidget);
+    expect(find.text('媒体库'), findsOneWidget);
+    expect(find.text('设置'), findsOneWidget);
   });
 
   testWidgets('Switching to settings tab shows settings', (tester) async {
     await tester.pumpWidget(const DreamPlayerApp());
 
-    await tester.tap(find.text('Settings'));
+    await tester.tap(find.text('设置'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Support'), findsOneWidget);
+    expect(find.text('支持'), findsOneWidget);
     await tester.scrollUntilVisible(
-      find.text('About'),
+      find.text('关于'),
       200,
       scrollable: find.byType(Scrollable).last,
     );
-    expect(find.text('About'), findsOneWidget);
+    expect(find.text('关于'), findsOneWidget);
     await tester.scrollUntilVisible(
-      find.text('Version'),
+      find.text('版本'),
       200,
       scrollable: find.byType(Scrollable).last,
     );
-    expect(find.text('Version'), findsOneWidget);
+    expect(find.text('版本'), findsOneWidget);
   });
 
   testWidgets('About lists open-source licenses', (tester) async {
     await tester.pumpWidget(const DreamPlayerApp());
 
-    await tester.tap(find.text('Settings'));
+    await tester.tap(find.text('设置'));
     await tester.pumpAndSettle();
 
     await tester.scrollUntilVisible(
-      find.text('Open-source licenses'),
+      find.text('开源许可'),
       200,
       scrollable: find.byType(Scrollable).last,
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Open-source licenses'));
+    await tester.tap(find.text('开源许可'));
     await tester.pumpAndSettle();
 
     expect(find.text('GNU GPL v3.0 and third-party notices'), findsNothing);
-    expect(find.text('nextlib-media3ext (Android FFmpeg extension)'), findsOneWidget);
+    expect(
+      find.text('nextlib-media3ext (Android FFmpeg extension)'),
+      findsOneWidget,
+    );
     expect(find.text('AetherEngine (iOS engine)'), findsOneWidget);
     expect(
-      find.textContaining('DreamPlayer is free software released under the GNU General'),
+      find.textContaining(
+        'DreamPlayer is free software released under the GNU General',
+      ),
       findsOneWidget,
     );
   });
@@ -73,24 +78,24 @@ void main() {
     );
     await tester.pumpWidget(const DreamPlayerApp());
 
-    await tester.tap(find.text('Settings'));
+    await tester.tap(find.text('设置'));
     await tester.pumpAndSettle();
 
     await tester.scrollUntilVisible(
-      find.text('Clear cache'),
+      find.text('清除缓存'),
       200,
       scrollable: find.byType(Scrollable).last,
     );
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Clear cache'));
+    await tester.tap(find.text('清除缓存'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Clear cache?'), findsOneWidget);
-    await tester.tap(find.text('Clear'));
+    expect(find.text('清除缓存？'), findsOneWidget);
+    await tester.tap(find.text('清除'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Cache cleared'), findsOneWidget);
-    expect(find.text('Cached images and temporary files cleared'), findsOneWidget);
+    expect(find.text('缓存已清除'), findsOneWidget);
+    expect(find.text('缓存图片和临时文件已清除'), findsOneWidget);
   });
 
   testWidgets('Tapping a video opens the player with codec chips', (
@@ -165,21 +170,21 @@ void main() {
     expect(find.text('WebDAV'), findsOneWidget);
     expect(find.text('FTP / SFTP'), findsOneWidget);
     expect(find.text('Jellyfin'), findsOneWidget);
-    expect(find.text('Network shares'), findsOneWidget);
+    expect(find.text('网络共享'), findsOneWidget);
     expect(find.text('DLNA'), findsOneWidget);
     // Tail entries live below the fold at this height — scroll to them.
     await tester.scrollUntilVisible(
-      find.text('Add folder to library'),
+      find.text('添加文件夹到媒体库'),
       120,
       scrollable: find.byType(Scrollable).last,
     );
-    expect(find.text('Add folder to library'), findsOneWidget);
+    expect(find.text('添加文件夹到媒体库'), findsOneWidget);
     await tester.scrollUntilVisible(
-      find.text('Internal storage'),
+      find.text('内部存储'),
       120,
       scrollable: find.byType(Scrollable).last,
     );
-    expect(find.text('Internal storage'), findsOneWidget);
+    expect(find.text('内部存储'), findsOneWidget);
   });
 
   testWidgets('No overflow with large text scale', (tester) async {
@@ -196,40 +201,41 @@ void main() {
     tester,
   ) async {
     const channel = MethodChannel('dreamplayer/files');
-    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-      channel,
-      (call) async {
-        switch (call.method) {
-          case 'hasAllFilesAccess':
-            return true;
-          case 'getStorageRoots':
-            return [
-              {
-                'name': 'Internal storage',
-                'path': '/storage/emulated/0',
-                'isDirectory': true,
-                'size': 0,
-              },
-            ];
-          case 'listDirectory':
-            Map<String, dynamic> dir(String name, String path) => {
-                  'name': name,
-                  'path': path,
-                  'isDirectory': true,
-                  'size': 0,
-                };
-            return switch (call.arguments['path'] as String) {
-              '/storage/emulated/0' =>
-                [dir('Download', '/storage/emulated/0/Download')],
-              '/storage/emulated/0/Download' =>
-                [dir('Movies', '/storage/emulated/0/Download/Movies')],
-              _ => <Map<String, dynamic>>[],
-            };
-          default:
-            return null;
-        }
-      },
-    );
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+      call,
+    ) async {
+      switch (call.method) {
+        case 'hasAllFilesAccess':
+          return true;
+        case 'getStorageRoots':
+          return [
+            {
+              'name': 'Internal storage',
+              'path': '/storage/emulated/0',
+              'isDirectory': true,
+              'size': 0,
+            },
+          ];
+        case 'listDirectory':
+          Map<String, dynamic> dir(String name, String path) => {
+            'name': name,
+            'path': path,
+            'isDirectory': true,
+            'size': 0,
+          };
+          return switch (call.arguments['path'] as String) {
+            '/storage/emulated/0' => [
+              dir('Download', '/storage/emulated/0/Download'),
+            ],
+            '/storage/emulated/0/Download' => [
+              dir('Movies', '/storage/emulated/0/Download/Movies'),
+            ],
+            _ => <Map<String, dynamic>>[],
+          };
+        default:
+          return null;
+      }
+    });
     addTearDown(
       () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
         channel,

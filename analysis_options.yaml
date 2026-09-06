@@ -16,6 +16,10 @@ analyzer:
     - windows/**
     - macos/**
     - linux/**
+    # Local Flutter packages have their own package_config and are analyzed
+    # independently. Excluding them here also avoids cross-host (Windows/WSL)
+    # package URI confusion in this mixed build environment.
+    - packages/**
 include: package:flutter_lints/flutter.yaml
 
 linter:

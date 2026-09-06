@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../models/video_item.dart';
+import '../danmaku/scraper/scrape_state.dart';
 import '../services/file_browser.dart';
 import '../services/jellyfin_client.dart';
 import '../services/library_folders.dart';
@@ -15,6 +16,8 @@ import '../widgets/season_progress_ring.dart';
 import '../widgets/tv_overscan.dart';
 import '../widgets/tv_tile.dart';
 import 'tmd_details_screen.dart';
+import 'danmaku_scrape_screen.dart';
+import '../l10n/app_localizations.dart';
 
 /// The contents of a library folder. For a TV-show folder this is the episode
 /// list; subfolders navigate one level at a time. Videos open their TMDB
@@ -101,8 +104,10 @@ class _FolderScreenState extends State<FolderScreen> {
 
   Future<void> _resolveMeta() async {
     try {
-      await TmdService.instance
-          .resolveFolder(widget.folder.metadataKey, widget.folder.name);
+      await TmdService.instance.resolveFolder(
+        widget.folder.metadataKey,
+        widget.folder.name,
+      );
     } catch (_) {
       // Non-fatal: the header just stays a placeholder.
     }
@@ -154,8 +159,9 @@ class _FolderScreenState extends State<FolderScreen> {
 
   Future<void> _loadJellyfin() async {
     try {
-      final server =
-          await _jellyfin.serverForUrl(widget.folder.jellyfinServerUrl ?? '');
+      final server = await _jellyfin.serverForUrl(
+        widget.folder.jellyfinServerUrl ?? '',
+      );
       if (server == null || !server.isAuthenticated) {
         throw const JellyfinException(
           'Jellyfin server is not signed in — open the Jellyfin screen and '
@@ -192,8 +198,14 @@ class _FolderScreenState extends State<FolderScreen> {
     try {
       final serverId = widget.folder.networkServerId ?? '';
       final share = widget.folder.networkShare ?? _networkShare;
-      final path = _currentPath.replaceAll(RegExp(r'/+$'), '').replaceAll(RegExp(r'^/+'), '');
-      final entries = await SmbClient.instance.listDirectory(serverId, share, path);
+      final path = _currentPath
+          .replaceAll(RegExp(r'/+$'), '')
+          .replaceAll(RegExp(r'^/+'), '');
+      final entries = await SmbClient.instance.listDirectory(
+        serverId,
+        share,
+        path,
+      );
       if (!mounted) return;
       setState(() {
         _smbEntries = entries;
@@ -230,7 +242,6 @@ class _FolderScreenState extends State<FolderScreen> {
     }
   }
 
-
   Future<void> _openEntry(FileEntry entry) async {
     if (entry.isDirectory) {
       setState(() => _currentPath = entry.path);
@@ -260,7 +271,8 @@ class _FolderScreenState extends State<FolderScreen> {
     if (!item.isPlayable) return;
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => TmdDetailsScreen(video: _jellyfin.videoItem(server, item)),
+        builder: (_) =>
+            TmdDetailsScreen(video: _jellyfin.videoItem(server, item)),
       ),
     );
     // Resume positions may have changed while playing.
@@ -290,9 +302,7 @@ class _FolderScreenState extends State<FolderScreen> {
     );
     if (!mounted) return;
     await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => TmdDetailsScreen(video: item),
-      ),
+      MaterialPageRoute<void>(builder: (_) => TmdDetailsScreen(video: item)),
     );
     await _loadSmb();
   }
@@ -370,8 +380,10 @@ class _FolderScreenState extends State<FolderScreen> {
         return;
       }
       setState(() {
-        _jellyfinCrumbs =
-            _jellyfinCrumbs.sublist(0, _jellyfinCrumbs.length - 1);
+        _jellyfinCrumbs = _jellyfinCrumbs.sublist(
+          0,
+          _jellyfinCrumbs.length - 1,
+        );
         _loading = true;
       });
       await _loadJellyfin();
@@ -398,19 +410,29 @@ class _FolderScreenState extends State<FolderScreen> {
           ? widget.folder.name
           : _jellyfinCrumbs.last.name;
     }
-    return _atRoot ? widget.folder.name : (_currentPath.split('/').lastOrNull ?? '');
+    return _atRoot
+        ? widget.folder.name
+        : (_currentPath.split('/').lastOrNull ?? '');
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(_title),
+        title: AppText(_title),
         leading: IconButton(
-          tooltip: 'Up',
+          tooltip: context.tr('Up'),
           icon: const Icon(Icons.arrow_back),
           onPressed: _goUp,
         ),
+        actions: [
+          if (!_loading && _danmakuVideos.isNotEmpty)
+            IconButton(
+              tooltip: context.tr('Scrape series danmaku'),
+              icon: const Icon(Icons.playlist_add_check_circle_outlined),
+              onPressed: _openDanmakuScraper,
+            ),
+        ],
       ),
       body: TvOverscan(child: _body(context)),
     );
@@ -422,7 +444,7 @@ class _FolderScreenState extends State<FolderScreen> {
     }
     if (_error != null) {
       return Center(
-        child: Text(
+        child: AppText(
           'Error: $_error',
           style: TextStyle(color: Theme.of(context).colorScheme.error),
         ),
@@ -433,7 +455,9 @@ class _FolderScreenState extends State<FolderScreen> {
       return Column(
         children: [
           if (_atRoot) _header(context),
-          const Expanded(child: Center(child: Text('No videos or folders here'))),
+          const Expanded(
+            child: Center(child: AppText('No videos or folders here')),
+          ),
         ],
       );
     }
@@ -444,10 +468,10 @@ class _FolderScreenState extends State<FolderScreen> {
       final isFolder = _isJellyfin
           ? (e as JellyfinItem).isFolder
           : _isSmb
-              ? (e as SmbEntry).isDirectory
-              : _isWebDav
-                  ? (e as Map)['isDirectory'] == true
-                  : (e as FileEntry).isDirectory;
+          ? (e as SmbEntry).isDirectory
+          : _isWebDav
+          ? (e as Map)['isDirectory'] == true
+          : (e as FileEntry).isDirectory;
       (isFolder ? folders : videos).add(e);
     }
     // Build season groups for episode videos; movies stay ungrouped.
@@ -475,7 +499,13 @@ class _FolderScreenState extends State<FolderScreen> {
       if (_isSmb) {
         final smb = e as SmbEntry;
         return _FolderTile(
-          entry: FileEntry(name: smb.name, path: smb.path, isDirectory: smb.isDirectory, size: smb.size, resumeKey: _watchedKeyForEntry(smb)),
+          entry: FileEntry(
+            name: smb.name,
+            path: smb.path,
+            isDirectory: smb.isDirectory,
+            size: smb.size,
+            resumeKey: _watchedKeyForEntry(smb),
+          ),
           tmdbMeta: smb.isDirectory ? null : _tmdbForSmb(smb),
           watched: _watchedKeys.contains(_watchedKeyForEntry(smb)),
           onToggleWatched: () => _toggleWatched(smb),
@@ -505,7 +535,7 @@ class _FolderScreenState extends State<FolderScreen> {
                     padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
                     child: Row(
                       children: [
-                        Text(
+                        AppText(
                           sg.seasonHeader(s),
                           style: TextStyle(
                             color: Theme.of(context).colorScheme.primary,
@@ -514,37 +544,39 @@ class _FolderScreenState extends State<FolderScreen> {
                           ),
                         ),
                         const SizedBox(width: 8),
-                        Builder(builder: (context) {
-                          final seasonList = seasonGroups[s]!;
-                          final watched = sg.watchedCount(
-                            seasonList,
-                            _watchedKeys,
-                            _watchedKeyForEntry,
-                          );
-                          final total = seasonList.length;
-                          return Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              SeasonProgressRing(
-                                watched: watched,
-                                total: total,
-                                size: 28,
-                                strokeWidth: 2.5,
-                              ),
-                              const SizedBox(width: 6),
-                              Text(
-                                sg.watchedBadge(watched, total),
-                                style: TextStyle(
-                                  color: Theme.of(context)
-                                      .colorScheme
-                                      .onSurfaceVariant,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
+                        Builder(
+                          builder: (context) {
+                            final seasonList = seasonGroups[s]!;
+                            final watched = sg.watchedCount(
+                              seasonList,
+                              _watchedKeys,
+                              _watchedKeyForEntry,
+                            );
+                            final total = seasonList.length;
+                            return Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                SeasonProgressRing(
+                                  watched: watched,
+                                  total: total,
+                                  size: 28,
+                                  strokeWidth: 2.5,
                                 ),
-                              ),
-                            ],
-                          );
-                        }),
+                                const SizedBox(width: 6),
+                                AppText(
+                                  sg.watchedBadge(watched, total),
+                                  style: TextStyle(
+                                    color: Theme.of(
+                                      context,
+                                    ).colorScheme.onSurfaceVariant,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ],
+                            );
+                          },
+                        ),
                       ],
                     ),
                   ),
@@ -603,12 +635,65 @@ class _FolderScreenState extends State<FolderScreen> {
     return _entries;
   }
 
+  List<ScrapeVideo> get _danmakuVideos {
+    final result = <ScrapeVideo>[];
+    for (final entry in _currentEntries) {
+      if (_isFolderEntry(entry)) continue;
+      final key = _watchedKeyForEntry(entry);
+      if (key == null || key.isEmpty) continue;
+      final name = switch (entry) {
+        JellyfinItem item => item.name,
+        SmbEntry item => item.name,
+        FileEntry item => item.name,
+        Map item => item['name'] as String? ?? '',
+        _ => '',
+      };
+      if (name.isEmpty) continue;
+      final parsed = ParsedFileName.parse(name);
+      final size = switch (entry) {
+        SmbEntry item => item.size,
+        FileEntry item => item.size,
+        Map item => (item['size'] as num?)?.toInt(),
+        _ => null,
+      };
+      result.add(
+        ScrapeVideo(
+          key: key,
+          fileName: name,
+          sizeBytes: size,
+          season: _isJellyfin
+              ? (entry as JellyfinItem).parentIndexNumber
+              : (parsed.season > 0 ? parsed.season : null),
+          episode: _isJellyfin
+              ? (entry as JellyfinItem).indexNumber
+              : (parsed.episode > 0 ? parsed.episode : null),
+        ),
+      );
+    }
+    return result;
+  }
+
+  Future<void> _openDanmakuScraper() async {
+    final videos = _danmakuVideos;
+    if (videos.isEmpty) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => DanmakuScrapeScreen(
+          folder: widget.folder,
+          seriesTitle: _title,
+          initialVideos: videos,
+        ),
+      ),
+    );
+  }
+
   /// Cached TMDB meta for a video file, looked up under the same identity key
   /// its tile/tap uses so the poster and the opened details screen agree.
   TmdMeta? _tmdbFor(FileEntry entry) {
     if (_isJellyfin) return null;
-    return TmdService.instance
-        .metaFor(TmdStore.identityKeyFor(_toVideoItem(entry)));
+    return TmdService.instance.metaFor(
+      TmdStore.identityKeyFor(_toVideoItem(entry)),
+    );
   }
 
   TmdMeta? _tmdbForSmb(SmbEntry entry) {
@@ -622,8 +707,9 @@ class _FolderScreenState extends State<FolderScreen> {
   TmdMeta? _tmdbForJellyfin(JellyfinItem item) {
     final server = _jellyfinServer;
     if (server == null) return null;
-    return TmdService.instance
-        .metaFor(TmdStore.identityKeyFor(_jellyfin.videoItem(server, item)));
+    return TmdService.instance.metaFor(
+      TmdStore.identityKeyFor(_jellyfin.videoItem(server, item)),
+    );
   }
 
   Widget _header(BuildContext context) {
@@ -668,7 +754,7 @@ class _FolderScreenState extends State<FolderScreen> {
             // The AppBar already shows the title, so the header only carries
             // the metadata line (year, kind, video/folder counts) — never a
             // second copy of the title.
-            child: Text(
+            child: AppText(
               _headerSubtitle(movie, videoCount, folderCount),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
@@ -682,7 +768,11 @@ class _FolderScreenState extends State<FolderScreen> {
     );
   }
 
-  static String _headerSubtitle(TmdMovie? movie, int videoCount, int folderCount) {
+  static String _headerSubtitle(
+    TmdMovie? movie,
+    int videoCount,
+    int folderCount,
+  ) {
     final countParts = <String>[
       videoCount == 1 ? '1 video' : '$videoCount videos',
       if (folderCount > 0)
@@ -721,7 +811,7 @@ class _JellyfinFolderTile extends StatelessWidget {
     if (item.isFolder) {
       return TvTile(
         leading: Icon(Icons.folder, color: colorScheme.primary),
-        title: Text(item.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+        title: AppText(item.name, maxLines: 1, overflow: TextOverflow.ellipsis),
         trailing: const Icon(Icons.chevron_right),
         onTap: onTap,
       );
@@ -734,7 +824,7 @@ class _JellyfinFolderTile extends StatelessWidget {
 
     final posterUrl = posterUrlOf(tmdbMeta);
 
-    final subtitleWidget = subtitle.isEmpty ? null : Text(subtitle);
+    final subtitleWidget = subtitle.isEmpty ? null : AppText(subtitle);
 
     return TvTile(
       leading: posterUrl != null
@@ -745,7 +835,7 @@ class _JellyfinFolderTile extends StatelessWidget {
                   : Icons.play_circle_outline,
               color: colorScheme.secondary,
             ),
-      title: Text(item.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+      title: AppText(item.name, maxLines: 1, overflow: TextOverflow.ellipsis),
       subtitle: subtitleWidget,
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
@@ -754,8 +844,9 @@ class _JellyfinFolderTile extends StatelessWidget {
             tooltip: watched ? 'Mark as unwatched' : 'Mark as watched',
             icon: Icon(
               watched ? Icons.check_circle : Icons.check_circle_outline,
-              color:
-                  watched ? Colors.green.shade400 : colorScheme.onSurfaceVariant,
+              color: watched
+                  ? Colors.green.shade400
+                  : colorScheme.onSurfaceVariant,
             ),
             onPressed: onToggleWatched,
           ),
@@ -800,7 +891,11 @@ class _FolderTile extends StatelessWidget {
     if (entry.isDirectory) {
       return TvTile(
         leading: Icon(Icons.folder, color: colorScheme.primary),
-        title: Text(entry.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+        title: AppText(
+          entry.name,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
         trailing: const Icon(Icons.chevron_right),
         onTap: onTap,
       );
@@ -815,16 +910,18 @@ class _FolderTile extends StatelessWidget {
 
     final posterUrl = posterUrlOf(tmdbMeta);
 
-    final subtitleWidget = subtitle.isEmpty ? null : Text(subtitle);
+    final subtitleWidget = subtitle.isEmpty ? null : AppText(subtitle);
 
     return TvTile(
       leading: posterUrl != null
           ? _Poster(posterUrl: posterUrl)
           : Icon(
-              parsed.isEpisode ? Icons.movie_outlined : Icons.play_circle_outline,
+              parsed.isEpisode
+                  ? Icons.movie_outlined
+                  : Icons.play_circle_outline,
               color: colorScheme.secondary,
             ),
-      title: Text(entry.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+      title: AppText(entry.name, maxLines: 1, overflow: TextOverflow.ellipsis),
       subtitle: subtitleWidget,
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
@@ -833,8 +930,9 @@ class _FolderTile extends StatelessWidget {
             tooltip: watched ? 'Mark as unwatched' : 'Mark as watched',
             icon: Icon(
               watched ? Icons.check_circle : Icons.check_circle_outline,
-              color:
-                  watched ? Colors.green.shade400 : colorScheme.onSurfaceVariant,
+              color: watched
+                  ? Colors.green.shade400
+                  : colorScheme.onSurfaceVariant,
             ),
             onPressed: onToggleWatched,
           ),

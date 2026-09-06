@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/video_item.dart';
+import 'webdav_client.dart';
 
 /// A video the user was watching: keeps enough metadata (title, source,
 /// duration) plus the resume position so the home library can show a
@@ -20,16 +21,17 @@ class ContinueWatchingEntry {
   final DateTime updatedAt;
 
   Map<String, dynamic> toJson() => {
-        'video': video.toJson(),
-        'positionMs': position.inMilliseconds,
-        'updatedAtMs': updatedAt.millisecondsSinceEpoch,
-      };
+    'video': video.toJson(),
+    'positionMs': position.inMilliseconds,
+    'updatedAtMs': updatedAt.millisecondsSinceEpoch,
+  };
 
   factory ContinueWatchingEntry.fromJson(Map<String, dynamic> json) {
     return ContinueWatchingEntry(
       video: VideoItem.fromJson((json['video'] as Map).cast<String, dynamic>()),
-      position:
-          Duration(milliseconds: (json['positionMs'] as num?)?.toInt() ?? 0),
+      position: Duration(
+        milliseconds: (json['positionMs'] as num?)?.toInt() ?? 0,
+      ),
       updatedAt: DateTime.fromMillisecondsSinceEpoch(
         (json['updatedAtMs'] as num?)?.toInt() ?? 0,
       ),
@@ -64,30 +66,69 @@ class ContinueWatchingStore {
     if (raw == null || raw.isEmpty) return <ContinueWatchingEntry>[];
     try {
       final list = jsonDecode(raw) as List<dynamic>;
-      return list
+      final entries = list
           .map((e) => ContinueWatchingEntry.fromJson(e as Map<String, dynamic>))
           .toList();
+      return await Future.wait(entries.map(_restoreNetworkAccess));
     } catch (_) {
       return const [];
     }
   }
 
-  static Future<void> save(
-    VideoItem video,
-    Duration position,
+  static Future<ContinueWatchingEntry> _restoreNetworkAccess(
+    ContinueWatchingEntry entry,
   ) async {
+    final video = entry.video;
+    final key = video.resumeKey ?? '';
+    if (video.playbackSource != PlaybackSource.webdav &&
+        !key.startsWith('webdav_')) {
+      return entry;
+    }
+    try {
+      final servers = await WebDavClient.instance.listServers();
+      WebDavServer? server;
+      final savedId = video.webdavServerId;
+      for (final candidate in servers) {
+        if ((savedId != null && candidate.id == savedId) ||
+            key.startsWith('webdav_${candidate.id}')) {
+          server = candidate;
+          break;
+        }
+      }
+      if (server == null) return entry;
+      String authorization = '';
+      try {
+        authorization = await WebDavClient.instance.authorizationHeader(
+          server.id,
+        );
+      } catch (_) {
+        // Anonymous WebDAV servers legitimately have no Authorization header.
+      }
+      final restored = video.withNetworkAccess(
+        httpHeaders: authorization.isEmpty
+            ? const {}
+            : {'Authorization': authorization},
+        webdavServerId: server.id,
+        allowSelfSigned: server.allowSelfSigned,
+      );
+      return ContinueWatchingEntry(
+        video: restored,
+        position: entry.position,
+        updatedAt: entry.updatedAt,
+      );
+    } catch (_) {
+      return entry;
+    }
+  }
+
+  static Future<void> save(VideoItem video, Duration position) async {
     if (position.inMilliseconds < 10000) return;
     final key = keyFor(video);
     if (key.isEmpty) return;
-    final entryVideo = VideoItem(
-      id: video.id,
-      title: video.title,
-      path: video.path,
-      uri: video.uri,
-      resumeKey: video.resumeKey,
-      duration: video.duration,
-      sizeBytes: video.sizeBytes,
-    );
+    // Keep non-sensitive source identity and media metadata. VideoItem.toJson
+    // intentionally omits httpHeaders, so WebDAV credentials are rehydrated
+    // from the native encrypted store by [load].
+    final entryVideo = video.withPlaybackInfo(duration: video.duration);
     final all = await load();
     all.removeWhere((e) => keyFor(e.video) == key);
     all.insert(
