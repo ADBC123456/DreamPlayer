@@ -283,6 +283,9 @@ class SeriesScrapeState {
     List<ScrapeEpisodeState> episodes = const [],
     this.phase = ScrapePhase.idle,
     this.generation = 0,
+    this.selectedAnimeId,
+    this.selectedAnimeTitle,
+    this.selectedEpisodeOffset = 0,
   }) : episodes = List.of(episodes);
 
   final SeriesScope scope;
@@ -295,6 +298,12 @@ class SeriesScrapeState {
 
   /// Bumped by every new run; results from older generations are discarded.
   int generation;
+
+  /// User-confirmed remote series. This keeps ambiguous title searches
+  /// deterministic across retries, force refreshes and app restarts.
+  String? selectedAnimeId;
+  String? selectedAnimeTitle;
+  int selectedEpisodeOffset;
 
   int get total => episodes.length;
 

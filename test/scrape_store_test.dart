@@ -35,6 +35,9 @@ void main() {
       final scope = scopeA();
       final st = SeriesScrapeState(
         scope: scope,
+        selectedAnimeId: '100',
+        selectedAnimeTitle: 'Show from platform A',
+        selectedEpisodeOffset: 52,
         episodes: [
           ScrapeEpisodeState(
             key: '/a.mkv',
@@ -89,6 +92,9 @@ void main() {
       expect(loaded.episodes[3].status, ScrapeStatus.cached);
       expect(loaded.episodes[4].status, ScrapeStatus.empty);
       expect(loaded.phase, ScrapePhase.partialFailure);
+      expect(loaded.selectedAnimeId, '100');
+      expect(loaded.selectedAnimeTitle, 'Show from platform A');
+      expect(loaded.selectedEpisodeOffset, 52);
     });
 
     test('transient states reset to pending on load', () async {

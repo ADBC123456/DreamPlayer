@@ -37,11 +37,17 @@ class DanmuApiRetryPolicy {
     this.maxAttempts = 3,
     this.initialBackoff = const Duration(milliseconds: 500),
     this.maxBackoff = const Duration(seconds: 6),
+    this.rateLimitFallback = const Duration(seconds: 30),
   });
 
   final int maxAttempts;
   final Duration initialBackoff;
   final Duration maxBackoff;
+
+  /// Conservative cooldown when a deployment returns 429 without the
+  /// standard Retry-After header. Public comment providers commonly allow
+  /// only a few requests per 30-second window.
+  final Duration rateLimitFallback;
 
   /// Backoff before retry [retryIndex] (0-based). Honors the server-provided
   /// [retryAfter] for 429 responses when it is longer than the computed one.
@@ -460,7 +466,10 @@ class DanmuApiSource implements DanmakuSource {
         rethrow;
       } on DanmakuRateLimitException catch (e) {
         failure = e;
-        backoff = retryPolicy.backoffFor(attempt, retryAfter: e.retryAfter);
+        backoff = retryPolicy.backoffFor(
+          attempt,
+          retryAfter: e.retryAfter ?? retryPolicy.rateLimitFallback,
+        );
       } on DanmakuServerException catch (e) {
         failure = e;
         backoff = retryPolicy.backoffFor(attempt);

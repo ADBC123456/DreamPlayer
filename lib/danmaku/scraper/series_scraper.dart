@@ -114,6 +114,9 @@ class SeriesScraper {
   int _generation = 0;
   bool _cancelRequested = false;
   DanmakuCancelToken? _cancelToken;
+  String? _selectedAnimeId;
+  String? _selectedAnimeTitle;
+  int _selectedEpisodeOffset = 0;
 
   /// Live state for the UI (read-only consumption; mutate via the scraper).
   SeriesScrapeState? get state => _state;
@@ -125,6 +128,9 @@ class SeriesScraper {
     if (restored == null) return null;
     _state = restored;
     _generation = restored.generation;
+    _selectedAnimeId = restored.selectedAnimeId;
+    _selectedAnimeTitle = restored.selectedAnimeTitle;
+    _selectedEpisodeOffset = restored.selectedEpisodeOffset;
     _cancelRequested = false;
     _notify();
     return restored;
@@ -143,13 +149,27 @@ class SeriesScraper {
     SeriesScope scope,
     List<ScrapeVideo> videos, {
     bool forceRefresh = false,
+    String? selectedAnimeId,
+    String? selectedAnimeTitle,
+    int? selectedEpisodeOffset,
   }) async {
+    if (selectedAnimeId != null && selectedAnimeId.isNotEmpty) {
+      _selectedAnimeId = selectedAnimeId;
+      _selectedAnimeTitle = selectedAnimeTitle;
+      _selectedEpisodeOffset = selectedEpisodeOffset ?? 0;
+    }
     final generation = ++_generation;
     _cancelToken?.cancel();
     final cancelToken = DanmakuCancelToken();
     _cancelToken = cancelToken;
     _cancelRequested = false;
-    final st = SeriesScrapeState(scope: scope, generation: generation);
+    final st = SeriesScrapeState(
+      scope: scope,
+      generation: generation,
+      selectedAnimeId: _selectedAnimeId,
+      selectedAnimeTitle: _selectedAnimeTitle,
+      selectedEpisodeOffset: _selectedEpisodeOffset,
+    );
     _state = st;
 
     st.phase = ScrapePhase.scanning;
@@ -247,8 +267,12 @@ class SeriesScraper {
       }
     }
 
+    // A manually selected catalog turns the run into comment downloads only.
+    // Keep those serial: common public providers allow three comments calls
+    // per rolling window and return 429 for even a small concurrent burst.
+    final workerCount = _selectedAnimeId == null ? maxConcurrency : 1;
     final workers = List.generate(
-      maxConcurrency.clamp(1, videosList.isEmpty ? 1 : videosList.length),
+      workerCount.clamp(1, videosList.isEmpty ? 1 : videosList.length),
       (_) => worker(),
       growable: false,
     );
@@ -267,6 +291,70 @@ class SeriesScraper {
     _notify();
     await store.ScrapeStore.saveTask(st);
     return SeriesScrapeResult(completed: true, generation: generation);
+  }
+
+  /// Loads the remote series candidates shown by the manual picker.
+  Future<List<DanmakuCatalogAnime>> searchCandidates(SeriesScope scope) async {
+    final token = DanmakuCancelToken();
+    return _withRetry(
+      () => source.searchEpisodes(scope.seriesTitle, cancelToken: token),
+      cancelToken: token,
+    );
+  }
+
+  /// Rebinds one local file to an explicitly selected remote episode.
+  /// The fetched cache and persisted task row both carry the user's choice,
+  /// so playback uses it immediately and an app restart does not lose it.
+  Future<void> manualMatchEpisode(
+    SeriesScope scope,
+    String videoKey,
+    DanmakuEpisodeRef ref,
+  ) async {
+    final st = _requireSameScope(scope);
+    final index = st.episodes.indexWhere((episode) => episode.key == videoKey);
+    if (index < 0) {
+      throw StateError('episode is not part of the current scrape task');
+    }
+    final generation = ++_generation;
+    _cancelToken?.cancel();
+    _cancelRequested = false;
+    final token = DanmakuCancelToken();
+    _cancelToken = token;
+    st.generation = generation;
+    st.phase = ScrapePhase.downloading;
+    st.episodes[index] = st.episodes[index].copyWith(
+      status: ScrapeStatus.fetching,
+      ref: ref,
+      clearError: true,
+    );
+    _notify();
+    try {
+      await _pace();
+      final count = await _withRetry<int>(
+        () => repository.fetchAndCache(ref, videoKey, cancelToken: token),
+        cancelToken: token,
+      );
+      if (_isStale || generation != _generation) return;
+      st.episodes[index] = st.episodes[index].copyWith(
+        status: count > 0 ? ScrapeStatus.success : ScrapeStatus.empty,
+        ref: ref,
+        commentCount: count,
+        fetchedAt: DateTime.now(),
+        clearError: true,
+      );
+    } on DanmakuScrapeException catch (error) {
+      if (_isStale || generation != _generation) return;
+      st.episodes[index] = st.episodes[index].copyWith(
+        status: ScrapeStatus.failed,
+        ref: ref,
+        error: error.message,
+      );
+    }
+    st.phase = st.hasFailure || st.noMatchCount > 0
+        ? ScrapePhase.partialFailure
+        : ScrapePhase.completed;
+    _notify();
+    await store.ScrapeStore.saveTask(st);
   }
 
   /// Re-runs only failed/noMatch episodes. The retried subset runs through
@@ -464,7 +552,12 @@ class SeriesScraper {
     if (catalog.isEmpty) return null;
 
     final DanmakuCatalogAnime anime;
-    if (catalog.length == 1) {
+    final selectedId = _selectedAnimeId;
+    if (selectedId != null) {
+      final selected = catalog.where((item) => item.animeId == selectedId);
+      if (selected.length != 1) return null;
+      anime = selected.single;
+    } else if (catalog.length == 1) {
       anime = catalog.single;
     } else {
       final expectedSeason = video.season ?? scope.season;
@@ -486,14 +579,17 @@ class SeriesScraper {
           ? null
           : 'Season ${video.season ?? scope.season}',
     );
-    final info = video.episode == null
+    final indexedEpisode = video.episode == null
+        ? null
+        : video.episode! + _selectedEpisodeOffset;
+    final info = indexedEpisode == null
         ? parsed
         : EpisodeInfo(
             source: video.season == null
                 ? EpisodeSource.episodeOnly
                 : EpisodeSource.seasonEpisode,
             season: video.season ?? scope.season ?? parsed.season,
-            episode: video.episode!,
+            episode: indexedEpisode,
             seriesName: parsed.seriesName,
           );
     final mapped = DanmuEpisodeMapper.match(info, [
@@ -553,6 +649,22 @@ class SeriesScraper {
   /// Serialises request starts so the source sees ≥[minRequestGap] between
   /// them (PRD: 同一 source 请求间隔 300~500ms; clamped to that window).
   Future<void> _pace() async {
+    // Workers may reach this method in the same event-loop turn. Reserve a
+    // queue slot synchronously before awaiting, otherwise both observe the
+    // same [_lastRequest] and issue requests together (real danmu_api servers
+    // answer that burst with HTTP 429).
+    final previous = _paceQueue;
+    final done = Completer<void>();
+    _paceQueue = done.future;
+    await previous;
+    try {
+      await _paceReservedRequest();
+    } finally {
+      done.complete();
+    }
+  }
+
+  Future<void> _paceReservedRequest() async {
     final gap = minRequestGap < const Duration(milliseconds: 300)
         ? const Duration(milliseconds: 300)
         : (minRequestGap > const Duration(milliseconds: 500)
@@ -570,6 +682,7 @@ class SeriesScraper {
   }
 
   DateTime? _lastRequest;
+  Future<void> _paceQueue = Future<void>.value();
 
   /// Retry wrapper: retryable exceptions (429/5xx/timeout) get exponential
   /// backoff up to [maxRetries]; non-retryable fail immediately. After the

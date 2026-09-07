@@ -494,6 +494,97 @@ void main() {
       expect(scraper.state!.episodes.single.ref!.episodeId, 'matched-episode');
     });
 
+    test('manual series selection batch maps an ambiguous catalog', () async {
+      final source = CatalogSource(const [
+        DanmakuCatalogAnime(
+          animeId: 'live-action',
+          animeTitle: 'Show (2025)',
+          episodes: [
+            DanmakuCatalogEpisode(
+              episodeId: 'live-1',
+              episodeTitle: 'Episode 1',
+              episodeNumber: 1,
+            ),
+          ],
+        ),
+        DanmakuCatalogAnime(
+          animeId: 'animation',
+          animeTitle: 'Show (2020) Animation',
+          episodes: [
+            DanmakuCatalogEpisode(
+              episodeId: 'animation-1',
+              episodeTitle: 'Episode 1',
+              episodeNumber: 1,
+            ),
+          ],
+        ),
+      ]);
+      final repo = FakeRepo();
+      final scraper = buildScraper(source, repo);
+
+      await scraper.start(
+        scope(),
+        [video(1)],
+        forceRefresh: true,
+        selectedAnimeId: 'animation',
+        selectedAnimeTitle: 'Show (2020) Animation',
+      );
+
+      expect(source.matchCalls, isEmpty);
+      expect(scraper.state!.episodes.single.ref!.animeId, 'animation');
+      expect(scraper.state!.episodes.single.ref!.episodeId, 'animation-1');
+      expect(scraper.state!.selectedAnimeId, 'animation');
+      expect(scraper.state!.phase, ScrapePhase.completed);
+    });
+
+    test('manual batch start episode applies an index offset', () async {
+      final source = CatalogSource(const [
+        DanmakuCatalogAnime(
+          animeId: 'animation',
+          animeTitle: 'Long running animation',
+          episodes: [
+            DanmakuCatalogEpisode(
+              episodeId: 'remote-53',
+              episodeTitle: 'Episode 53',
+              episodeNumber: 53,
+            ),
+          ],
+        ),
+      ]);
+      final scraper = buildScraper(source, FakeRepo());
+
+      await scraper.start(
+        scope(),
+        [video(1)],
+        selectedAnimeId: 'animation',
+        selectedAnimeTitle: 'Long running animation',
+        selectedEpisodeOffset: 52,
+      );
+
+      expect(scraper.state!.episodes.single.ref!.episodeId, 'remote-53');
+      expect(scraper.state!.selectedEpisodeOffset, 52);
+    });
+
+    test('manual episode selection replaces an existing match', () async {
+      final source = FakeSource();
+      final repo = FakeRepo();
+      final scraper = buildScraper(source, repo);
+      await scraper.start(scope(), [video(1)]);
+
+      const replacement = DanmakuEpisodeRef(
+        animeId: 'other-platform',
+        episodeId: 'other-episode-1',
+        animeTitle: 'Show from another platform',
+        episodeTitle: 'Episode 1',
+      );
+      await scraper.manualMatchEpisode(scope(), video(1).key, replacement);
+
+      final episode = scraper.state!.episodes.single;
+      expect(episode.ref, replacement);
+      expect(episode.status, ScrapeStatus.success);
+      expect(repo.fetchedKeys.last, video(1).key);
+    });
+
     test('content hash match takes priority over catalog mapping', () async {
       final source = FakeSource(
         matchRefs: const {
