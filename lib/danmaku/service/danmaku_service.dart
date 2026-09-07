@@ -22,6 +22,7 @@ import 'dart:io';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../models/video_item.dart';
+import '../binding/danmaku_binding_store.dart';
 import '../identity/video_identity.dart' as vid;
 import '../models/danmaku_models.dart' as models;
 import '../repository/danmaku_cache.dart';
@@ -235,6 +236,51 @@ class DanmakuService {
     var sawFailure = false;
     var sawNoMatch = false;
     var sawEmpty = false;
+
+    // A saved binding is authoritative and is checked across every enabled
+    // deployment before filename/metadata matching. This prevents a higher
+    // priority source from auto-matching the wrong series ahead of a user's
+    // explicit choice on another source.
+    var foundBinding = false;
+    for (final source in sources) {
+      final binding = await DanmakuBindingStore.load(
+        sourceId: source.id,
+        sourceBaseUrl: source.baseUrl,
+        videoIdentity: identity.stableKey,
+      );
+      if (binding == null) continue;
+      foundBinding = true;
+      final result = await repository.loadForEpisode(
+        sourceId: source.id,
+        baseUrl: source.baseUrl,
+        request: DanmakuVideoRequest(
+          videoIdentity: identity.stableKey,
+          fileName: identity.fileName,
+          fileHash: identity.fileHash,
+          fileSize: identity.fileSize,
+          videoKey: identity.stableKey,
+        ),
+        episodeId: binding.ref.episodeId,
+        shiftSeconds: binding.ref.shift,
+      );
+      switch (result.status) {
+        case DanmakuFetchStatus.fromCache:
+        case DanmakuFetchStatus.fromNetwork:
+          return _outcomeFrom(result);
+        case DanmakuFetchStatus.empty:
+          return const DanmakuLoadOutcome._(status: DanmakuStatus.empty);
+        case DanmakuFetchStatus.noMatch:
+          sawNoMatch = true;
+        case DanmakuFetchStatus.failed:
+          sawFailure = true;
+      }
+    }
+    if (foundBinding) {
+      return DanmakuLoadOutcome._(
+        status: sawFailure ? DanmakuStatus.failed : DanmakuStatus.noMatch,
+      );
+    }
+
     for (final source in sources) {
       final result = await repository.loadForVideo(
         sourceId: source.id,
@@ -484,11 +530,17 @@ class _ScrapeRepositoryAdapter implements DanmakuScrapeRepository {
   final DanmakuSourceConfig _config;
 
   @override
-  Future<bool> hasValidCache(String videoKey, {bool forceRefresh = false}) {
+  Future<bool> hasValidCache(
+    String videoKey, {
+    bool forceRefresh = false,
+    String? episodeId,
+  }) {
     if (forceRefresh) return Future.value(false);
     return _service.cache
         .read(sourceId: _sourceId, baseUrl: _baseUrl, videoIdentity: videoKey)
-        .then((e) => e != null);
+        .then(
+          (e) => e != null && (episodeId == null || e.episodeId == episodeId),
+        );
   }
 
   @override

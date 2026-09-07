@@ -175,7 +175,7 @@ class DanmakuRepository {
         baseUrl: baseUrl,
         videoIdentity: request.videoIdentity,
       );
-      if (cached != null) {
+      if (cached != null && cached.episodeId == episodeId) {
         return DanmakuFetchResult._(
           status: cached.comments.isEmpty
               ? DanmakuFetchStatus.empty

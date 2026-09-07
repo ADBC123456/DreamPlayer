@@ -149,7 +149,7 @@ class _DanmakuScrapeScreenState extends State<DanmakuScrapeScreen> {
             repository: _service.scrapeRepositoryFor(config),
             onChanged: _changed,
           );
-      final restored = await scraper.restore(scope);
+      await scraper.restore(scope, videos: videos);
       if (!mounted) return;
       setState(() {
         _videos = videos;
@@ -157,18 +157,6 @@ class _DanmakuScrapeScreenState extends State<DanmakuScrapeScreen> {
         _scraper = scraper;
         _preparing = false;
       });
-      final currentKeys = videos.map((video) => video.key).toSet();
-      final restoredKeys = restored?.episodes
-          .map((episode) => episode.key)
-          .toSet();
-      final listingChanged =
-          restoredKeys == null ||
-          restoredKeys.length != currentKeys.length ||
-          !restoredKeys.containsAll(currentKeys);
-      if (videos.isNotEmpty &&
-          (restored == null || restored.remainingCount > 0 || listingChanged)) {
-        await _run();
-      }
     } catch (error) {
       if (mounted) {
         setState(() {
@@ -265,7 +253,8 @@ class _DanmakuScrapeScreenState extends State<DanmakuScrapeScreen> {
         content: AppText(
           '${selected.animeTitle}\n'
           '${selected.episodes.length} remote episodes · ${_videos.length} local files\n'
-          'Local episode $firstLocalEpisode → remote episode $remoteStart',
+          'Local episode $firstLocalEpisode → remote episode $remoteStart\n\n'
+          'This saves the bindings only. Comments load when an episode plays.',
         ),
         actions: [
           TextButton(
@@ -281,14 +270,21 @@ class _DanmakuScrapeScreenState extends State<DanmakuScrapeScreen> {
       ),
     );
     if (confirmed != true || !mounted) return;
-    await _scraper?.start(
+    final bound = await _scraper?.bindSeries(
       _scope!,
       _videos,
-      forceRefresh: true,
-      selectedAnimeId: selected.animeId,
-      selectedAnimeTitle: selected.animeTitle,
-      selectedEpisodeOffset: offset,
+      selected,
+      episodeOffset: offset,
     );
+    if (mounted && !_disposing) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: AppText(
+            'Saved ${bound ?? 0} / ${_videos.length} episode bindings',
+          ),
+        ),
+      );
+    }
     _changed();
   }
 
@@ -392,7 +388,10 @@ class _DanmakuScrapeScreenState extends State<DanmakuScrapeScreen> {
     final finished =
         state?.episodes
             .where(
-              (e) => e.status.isTerminal || e.status == ScrapeStatus.cancelled,
+              (e) =>
+                  e.status.isTerminal ||
+                  e.status == ScrapeStatus.matched ||
+                  e.status == ScrapeStatus.cancelled,
             )
             .length ??
         0;
@@ -458,10 +457,10 @@ class _DanmakuScrapeScreenState extends State<DanmakuScrapeScreen> {
                         ),
                       if (!_running)
                         OutlinedButton.icon(
-                          key: const Key('force-rescrape'),
-                          onPressed: () => _run(force: true),
+                          key: const Key('precache-season'),
+                          onPressed: () => _run(),
                           icon: const Icon(Icons.cloud_download_outlined),
-                          label: const AppText('Force re-scrape'),
+                          label: const AppText('Pre-cache whole season'),
                         ),
                     ],
                   ),
@@ -495,6 +494,7 @@ class _DanmakuScrapeScreenState extends State<DanmakuScrapeScreen> {
                 status: episode?.status ?? ScrapeStatus.pending,
                 commentCount: episode?.commentCount,
                 error: episode?.error,
+                ref: episode?.ref,
                 onTap: episode == null || _running
                     ? null
                     : () => _chooseEpisode(episode),
@@ -526,6 +526,7 @@ class _EpisodeTile extends StatelessWidget {
     this.episode,
     this.commentCount,
     this.error,
+    this.ref,
     this.onTap,
   });
   final String fileName;
@@ -534,6 +535,7 @@ class _EpisodeTile extends StatelessWidget {
   final int? episode;
   final int? commentCount;
   final String? error;
+  final DanmakuEpisodeRef? ref;
   final VoidCallback? onTap;
 
   @override
@@ -549,7 +551,10 @@ class _EpisodeTile extends StatelessWidget {
         leading: Icon(_statusIcon(status), color: _statusColor(theme, status)),
         title: AppText(label),
         subtitle: AppText(
-          error ?? (label == fileName ? '' : fileName),
+          error ??
+              (ref?.episodeTitle == null
+                  ? (label == fileName ? '' : fileName)
+                  : '弹幕：${ref!.episodeTitle}'),
           maxLines: 2,
           overflow: TextOverflow.ellipsis,
         ),
@@ -587,7 +592,9 @@ class _EpisodeTile extends StatelessWidget {
   static Color _statusColor(ThemeData theme, ScrapeStatus status) =>
       status == ScrapeStatus.failed || status == ScrapeStatus.noMatch
       ? theme.colorScheme.error
-      : status == ScrapeStatus.success || status == ScrapeStatus.cached
+      : status == ScrapeStatus.success ||
+            status == ScrapeStatus.cached ||
+            status == ScrapeStatus.matched
       ? theme.colorScheme.primary
       : theme.colorScheme.onSurfaceVariant;
 }

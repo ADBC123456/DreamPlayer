@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:dream_player/danmaku/binding/danmaku_binding_store.dart';
 import 'package:dream_player/danmaku/scraper/scrape_state.dart';
 import 'package:dream_player/danmaku/scraper/series_scraper.dart';
 import 'package:dream_player/danmaku/source/danmaku_source_registry.dart';
@@ -111,8 +112,11 @@ class FakeRepo implements DanmakuScrapeRepository {
   final List<String> attemptedKeys = [];
 
   @override
-  Future<bool> hasValidCache(String key, {bool forceRefresh = false}) async =>
-      !forceRefresh && cacheHits.contains(key);
+  Future<bool> hasValidCache(
+    String key, {
+    bool forceRefresh = false,
+    String? episodeId,
+  }) async => !forceRefresh && cacheHits.contains(key);
 
   @override
   Future<int> fetchAndCache(
@@ -581,8 +585,39 @@ void main() {
 
       final episode = scraper.state!.episodes.single;
       expect(episode.ref, replacement);
-      expect(episode.status, ScrapeStatus.success);
-      expect(repo.fetchedKeys.last, video(1).key);
+      expect(episode.status, ScrapeStatus.matched);
+      expect(repo.fetchedKeys, [video(1).key]);
+      expect(
+        (await DanmakuBindingStore.loadForScope(
+          scope(),
+        ))[video(1).key]!.ref.episodeId,
+        'other-episode-1',
+      );
+    });
+
+    test('batch binding persists every mapping without downloading', () async {
+      final source = FakeSource();
+      final repo = FakeRepo();
+      final scraper = buildScraper(source, repo);
+      final videos = [video(1), video(2)];
+      final anime = (await source.searchEpisodes('Show')).single;
+
+      final count = await scraper.bindSeries(scope(), videos, anime);
+
+      expect(count, 2);
+      expect(repo.fetchedKeys, isEmpty);
+      expect(
+        scraper.state!.episodes.every((e) => e.status == ScrapeStatus.matched),
+        isTrue,
+      );
+      final bindings = await DanmakuBindingStore.loadForScope(scope());
+      expect(bindings['/shows/x/ep1.mkv']!.ref.episodeId, '9001');
+      expect(bindings['/shows/x/ep2.mkv']!.ref.episodeId, '9002');
+
+      source.searchEpisodesCalls = 0;
+      await scraper.start(scope(), videos);
+      expect(source.searchEpisodesCalls, 0);
+      expect(repo.fetchedKeys, ['/shows/x/ep1.mkv', '/shows/x/ep2.mkv']);
     });
 
     test('content hash match takes priority over catalog mapping', () async {

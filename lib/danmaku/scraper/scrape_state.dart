@@ -262,6 +262,8 @@ class ScrapeEpisodeState {
     DateTime? fetchedAt,
     bool clearRef = false,
     bool clearError = false,
+    bool clearCommentCount = false,
+    bool clearFetchedAt = false,
   }) => ScrapeEpisodeState(
     key: key,
     fileName: fileName,
@@ -269,9 +271,11 @@ class ScrapeEpisodeState {
     season: season,
     episode: episode,
     ref: clearRef ? null : (ref ?? this.ref),
-    commentCount: commentCount ?? this.commentCount,
+    commentCount: clearCommentCount
+        ? null
+        : (commentCount ?? this.commentCount),
     error: clearError ? null : (error ?? this.error),
-    fetchedAt: fetchedAt ?? this.fetchedAt,
+    fetchedAt: clearFetchedAt ? null : (fetchedAt ?? this.fetchedAt),
   );
 }
 
