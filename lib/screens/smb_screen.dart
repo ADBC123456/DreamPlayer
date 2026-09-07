@@ -19,7 +19,9 @@ import '../l10n/app_localizations.dart';
 /// Playback streams through the native SMB client (local proxy URL on iOS);
 /// tapping a video opens a single `openShare` URL, torn down on return.
 class SmbScreen extends StatefulWidget {
-  const SmbScreen({super.key});
+  const SmbScreen({super.key, this.initialServerId});
+
+  final String? initialServerId;
 
   @override
   State<SmbScreen> createState() => _SmbScreenState();
@@ -59,7 +61,16 @@ class _SmbScreenState extends State<SmbScreen> {
   void initState() {
     super.initState();
     TmdService.instance.addListener(_onMetadataChanged);
-    _loadServers();
+    _initialize();
+  }
+
+  Future<void> _initialize() async {
+    await _loadServers();
+    if (!mounted || widget.initialServerId == null) return;
+    final server = _servers
+        .where((s) => s.id == widget.initialServerId)
+        .firstOrNull;
+    if (server != null) await _openServer(server);
   }
 
   @override

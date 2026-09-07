@@ -18,7 +18,9 @@ enum _FtpProtocol { ftp, sftp }
 /// via a custom ExoPlayer DataSource (FtpDataSource) that wraps
 /// Apache Commons Net (FTP) or JSch (SFTP) with seek via REST / SFTP resume.
 class FtpScreen extends StatefulWidget {
-  const FtpScreen({super.key});
+  const FtpScreen({super.key, this.initialServerId});
+
+  final String? initialServerId;
 
   @override
   State<FtpScreen> createState() => _FtpScreenState();
@@ -40,7 +42,16 @@ class _FtpScreenState extends State<FtpScreen> {
   void initState() {
     super.initState();
     TmdService.instance.addListener(_onMetadataChanged);
-    _loadServers();
+    _initialize();
+  }
+
+  Future<void> _initialize() async {
+    await _loadServers();
+    if (!mounted || widget.initialServerId == null) return;
+    final server = _servers
+        .where((s) => s.id == widget.initialServerId)
+        .firstOrNull;
+    if (server != null) await _openServer(server);
   }
 
   @override

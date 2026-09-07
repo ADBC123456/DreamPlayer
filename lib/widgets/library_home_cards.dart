@@ -4,6 +4,60 @@ import '../l10n/app_localizations.dart';
 import '../library/models/library_models.dart';
 import '../services/recent_library_items.dart';
 
+class SavedSourceTile extends StatelessWidget {
+  const SavedSourceTile({
+    super.key,
+    required this.name,
+    required this.subtitle,
+    required this.icon,
+    required this.onTap,
+    this.onLongPress,
+  });
+
+  final String name;
+  final String subtitle;
+  final IconData icon;
+  final VoidCallback onTap;
+  final VoidCallback? onLongPress;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      label: '$name，$subtitle',
+      child: ListTile(
+        minTileHeight: 80,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
+        leading: SizedBox.square(
+          dimension: 48,
+          child: Icon(
+            icon,
+            size: 32,
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
+        ),
+        title: AppText(
+          name,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: Theme.of(context).textTheme.titleMedium,
+        ),
+        subtitle: AppText(
+          subtitle,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            color: Theme.of(context).colorScheme.onSurfaceVariant,
+          ),
+        ),
+        trailing: const Icon(Icons.chevron_right_rounded),
+        onTap: onTap,
+        onLongPress: onLongPress,
+      ),
+    );
+  }
+}
+
 String playbackTime(Duration value) {
   final seconds = value.inSeconds.clamp(0, 359999);
   final minutes = (seconds ~/ 60).remainder(60).toString().padLeft(2, '0');
