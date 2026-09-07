@@ -126,6 +126,18 @@ class AppLocalizations {
 
   static const Map<String, String> _zh = {
     'Library': '媒体库',
+    'Source library': '资源库',
+    'My': '我的',
+    'Recently watched': '最近观看',
+    'Movies': '电影',
+    'TV shows': '电视剧',
+    'Sort': '排序',
+    'Recently added': '最近入库',
+    'Search titles, episodes or files': '搜索影片、剧集或文件',
+    'No matching titles': '没有匹配的影片',
+    'No titles yet': '暂无影片',
+    'Could not refresh library. Please try again.': '无法刷新媒体库，请重试。',
+    'Could not open video. Check the source and try again.': '无法打开视频，请检查来源后重试。',
     'Settings': '设置',
     'Support': '支持',
     'Storage': '存储',

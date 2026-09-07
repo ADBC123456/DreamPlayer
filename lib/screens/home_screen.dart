@@ -9,6 +9,7 @@ import '../library/models/library_models.dart';
 import '../library/repository/library_repository.dart';
 import '../library/scanner/library_scanner.dart';
 import '../library/unified_library_service.dart';
+import '../library/title_playback_preferences.dart';
 import '../models/video_item.dart';
 import '../services/continue_watching.dart';
 import '../services/file_browser.dart';
@@ -17,13 +18,12 @@ import '../services/library_folders.dart';
 import '../services/tmdb_client.dart';
 import '../services/webdav_client.dart';
 import '../widgets/folder_card.dart';
-import '../widgets/media_title_card.dart';
+import '../widgets/library_home_cards.dart';
+import '../services/recent_library_items.dart';
 import '../widgets/tv_text_field.dart';
 import 'ftp_screen.dart';
 import 'player_screen.dart';
 import '../widgets/tv_overscan.dart';
-import '../widgets/video_card.dart';
-import '../utils/tv_helper.dart';
 import 'file_browser_screen.dart';
 import 'jellyfin_screen.dart';
 import '../utils/file_info_extractor.dart';
@@ -37,7 +37,9 @@ import 'webdav_screen.dart';
 import '../l10n/app_localizations.dart';
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key, this.refreshTick});
+  const HomeScreen({super.key, this.refreshTick, this.sourcesOnly = false});
+
+  final bool sourcesOnly;
 
   /// Notifies the screen that it became visible again (e.g. the Library tab
   /// was re-selected) so it can reload its continue-watching list.
@@ -53,7 +55,10 @@ class _HomeScreenState extends State<HomeScreen>
       TextEditingController();
   Timer? _librarySearchDebounce;
   String _librarySearch = '';
-  MediaTitleKind? _libraryKind;
+  bool _searchVisible = false;
+  bool _sortByName = false;
+  bool _refreshing = false;
+  bool _openingRecent = false;
 
   /// "Continue watching": videos with a saved resume position, most recently
   /// played first (persisted via [ContinueWatchingStore]).
@@ -293,46 +298,6 @@ class _HomeScreenState extends State<HomeScreen>
     await _loadLibrary();
   }
 
-  Future<void> _openLibraryCard(LibraryFolder folder) async {
-    final metadata = TmdService.instance.metaFor(folder.metadataKey);
-    if (metadata == null) {
-      await _openFolder(folder);
-      return;
-    }
-
-    MediaTitle? indexedTitle() => _unifiedLibrary.snapshot.titles.values
-        .where(
-          (title) =>
-              title.tmdbId == metadata.movie.id &&
-              ((title.kind == MediaTitleKind.tv) ==
-                  (metadata.movie.kind == TmdKind.tv)),
-        )
-        .firstOrNull;
-
-    var title = indexedTitle();
-    if (title == null) {
-      try {
-        await _unifiedLibrary.refresh([folder]);
-        title = indexedTitle();
-      } catch (_) {
-        // The scan coordinator already preserves the old index and exposes
-        // the source-specific failure on the home progress bar.
-      }
-    }
-    if (!mounted) return;
-    if (title == null) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: AppText('尚未建立剧集索引，请重新自动识别这个目录')));
-      return;
-    }
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => UnifiedTitleDetailsScreen(titleId: title!.id),
-      ),
-    );
-  }
-
   Future<void> _removeFolder(LibraryFolder folder) async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -385,6 +350,7 @@ class _HomeScreenState extends State<HomeScreen>
     await service.ensureLoaded();
     for (final e in entries) {
       final video = e.video;
+      if (video.metadataContext != null) continue;
       final key = TmdStore.identityKeyFor(video);
       if (service.metaFor(key) != null) continue;
       try {
@@ -425,84 +391,50 @@ class _HomeScreenState extends State<HomeScreen>
     });
   }
 
-  void _openVideo(ContinueWatchingEntry entry) async {
-    // iOS: re-grant security-scoped access to the picked file if it's outside
-    // the sandbox (the picker's grant expires between launches). Covers both
-    // per-file imported videos and files inside bookmarked folders.
-    if (entry.video.path != null) {
-      await FileBrowserService.instance.resolvePath(entry.video.path!);
-    }
-    if (!mounted) return;
-    var video = await _restoreWebDavSource(entry.video);
-    if (!mounted) return;
-    final restored = await _restoreJellyfinSource(video);
-    if (!mounted) return;
-    // Open the details page first; Play launches the player from there.
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => TmdDetailsScreen(video: restored),
-      ),
-    );
-    // Resume positions may have changed while playing — refresh on return.
-    await _loadLibrary();
-    // Scroll back to the top so the app-bar title and section heading are
-    // visible (the watched card moves to index 0 after the list reorders,
-    // which would otherwise leave the viewport stranded mid-list).
-    if (mounted && _scrollController.hasClients) {
-      _scrollController.jumpTo(0);
-    }
-  }
-
-  /// Groups continue-watching entries by TV show (via TMDB show ID) so
-  /// episodes from the same series appear as a single card. Non-episode
-  /// entries (movies, standalone videos) pass through ungrouped.
-  List<_GroupedContinueWatching> _groupedByShow(
-    List<ContinueWatchingEntry> entries,
-  ) {
-    final service = TmdService.instance;
-    final Map<String, _GroupedContinueWatching> shows = {};
-    final List<_GroupedContinueWatching> result = [];
-
-    for (final entry in entries) {
-      final video = entry.video;
-      final parsed = ParsedFileName.parse(video.title);
-      if (parsed.isEpisode) {
-        final key = TmdStore.identityKeyFor(video);
-        final meta = service.metaFor(key);
-        final showId = meta?.movie.id.toString();
-        if (showId != null) {
-          shows.putIfAbsent(
-            showId,
-            () => _GroupedContinueWatching(
-              showTitle: meta?.movie.title ?? parsed.title,
-              showMeta: meta,
-              entries: [],
-            ),
-          );
-          shows[showId]!.entries.add(entry);
-          continue;
+  Future<void> _playRecent(RecentLibraryItem item) async {
+    if (_openingRecent) return;
+    setState(() => _openingRecent = true);
+    try {
+      var video = item.entry.video;
+      if (item.file != null) {
+        video = (await _unifiedLibrary.resolvePlayable(
+          item.file!,
+        )).withMetadataContext(item.metadata);
+      } else {
+        if (video.path != null) {
+          await FileBrowserService.instance.resolvePath(video.path!);
         }
+        video = await _restoreWebDavSource(video);
+        video = (await _restoreJellyfinSource(
+          video,
+        )).withMetadataContext(item.metadata);
       }
-      // Non-episode or no TMDB match → pass through as-is.
-      result.add(
-        _GroupedContinueWatching(
-          showTitle: video.title,
-          showMeta: null,
-          entries: [entry],
-        ),
+      if (!mounted) return;
+      if (item.title != null && item.file != null) {
+        await TitlePlaybackPreferences.save(
+          titleId: item.title!.id,
+          lastPlayedFileId: item.file!.id,
+          lastPlayedEpisodeId: item.episode?.id,
+        );
+      }
+      if (!mounted) return;
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(builder: (_) => PlayerScreen(video: video)),
       );
+      await _loadLibrary();
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: AppText(
+              'Could not open video. Check the source and try again.',
+            ),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _openingRecent = false);
     }
-
-    // Sort grouped shows by most-recently-played entry.
-    final grouped = shows.values.toList()
-      ..sort((a, b) {
-        final aTime = a.entries.first.position;
-        final bTime = b.entries.first.position;
-        return bTime.compareTo(aTime);
-      });
-
-    result.insertAll(0, grouped);
-    return result;
   }
 
   /// WebDAV entries deliberately do NOT persist the Authorization header (no
@@ -619,100 +551,131 @@ class _HomeScreenState extends State<HomeScreen>
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final tv = isTvMode(context);
-    final librarySnapshot = _unifiedLibrary.snapshot;
-    final indexedTitles =
-        librarySnapshot.titles.values
+    final snapshot = _unifiedLibrary.snapshot;
+    final newest = <String, int>{};
+    for (final file in snapshot.files.values) {
+      final id = file.titleId;
+      if (id == null) continue;
+      final stamp = file.discoveredAt?.millisecondsSinceEpoch ?? 0;
+      if (stamp > (newest[id] ?? 0)) newest[id] = stamp;
+    }
+    final titles =
+        snapshot.titles.values
             .where(
-              (title) =>
-                  (_libraryKind == null || title.kind == _libraryKind) &&
-                  _matchesLibrarySearch(librarySnapshot, title, _librarySearch),
+              (title) => _matchesLibrarySearch(snapshot, title, _librarySearch),
             )
             .toList()
-          ..sort((a, b) {
-            final aNewest = _newestDiscoveryForTitle(librarySnapshot, a.id);
-            final bNewest = _newestDiscoveryForTitle(librarySnapshot, b.id);
-            return bNewest.compareTo(aNewest);
-          });
+          ..sort(
+            (a, b) => _sortByName
+                ? a.displayTitle.toLowerCase().compareTo(
+                    b.displayTitle.toLowerCase(),
+                  )
+                : (newest[b.id] ?? 0).compareTo(newest[a.id] ?? 0),
+          );
+    final recent = recentLibraryItems(
+      _entries,
+      snapshot,
+      legacyMetadata: (video) =>
+          TmdService.instance.metaFor(TmdStore.identityKeyFor(video)),
+    );
     final activeScans = _unifiedLibrary.progressByRoot.values
         .where(
-          (progress) =>
-              progress.state == ScanState.queued ||
-              progress.state == ScanState.scanning,
+          (p) => p.state == ScanState.queued || p.state == ScanState.scanning,
         )
         .toList();
     final failedScans = _unifiedLibrary.progressByRoot.values
-        .where((progress) => progress.state == ScanState.failed)
+        .where((p) => p.state == ScanState.failed)
         .toList();
     return Scaffold(
       body: TvOverscan(
         child: CustomScrollView(
+          key: PageStorageKey(
+            widget.sourcesOnly ? 'sources-home' : 'media-home',
+          ),
           controller: _scrollController,
           slivers: [
-            SliverAppBar(title: const AppText('影视库'), pinned: true),
-            SliverPadding(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-              sliver: SliverToBoxAdapter(
-                child: TvTextField(
-                  controller: _librarySearchController,
-                  onChanged: (value) {
-                    _librarySearchDebounce?.cancel();
-                    _librarySearchDebounce = Timer(
-                      const Duration(milliseconds: 250),
-                      () {
-                        if (mounted) setState(() => _librarySearch = value);
-                      },
-                    );
-                  },
-                  decoration: InputDecoration(
-                    hintText: '搜索影片、剧集或文件',
-                    prefixIcon: const Icon(Icons.search),
-                    suffixIcon: _librarySearchController.text.isEmpty
-                        ? null
-                        : IconButton(
-                            tooltip: 'Clear',
-                            onPressed: () {
-                              _librarySearchController.clear();
-                              setState(() => _librarySearch = '');
-                            },
-                            icon: const Icon(Icons.clear),
-                          ),
+            SliverAppBar(
+              pinned: true,
+              titleSpacing: 16,
+              title: Text(
+                widget.sourcesOnly
+                    ? context.tr('Source library')
+                    : 'DreamPlayer',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              actions: [
+                if (!widget.sourcesOnly)
+                  IconButton(
+                    tooltip: context.tr('Search'),
+                    icon: const Icon(Icons.search),
+                    onPressed: () => setState(() {
+                      _searchVisible = !_searchVisible;
+                      if (!_searchVisible) {
+                        _librarySearchDebounce?.cancel();
+                        _librarySearchController.clear();
+                        _librarySearch = '';
+                      }
+                    }),
+                  ),
+                if (!widget.sourcesOnly)
+                  PopupMenuButton<bool>(
+                    tooltip: context.tr('Sort'),
+                    icon: const Icon(Icons.sort),
+                    initialValue: _sortByName,
+                    onSelected: (value) => setState(() => _sortByName = value),
+                    itemBuilder: (_) => [
+                      CheckedPopupMenuItem(
+                        value: false,
+                        checked: !_sortByName,
+                        child: AppText('Recently added'),
+                      ),
+                      CheckedPopupMenuItem(
+                        value: true,
+                        checked: _sortByName,
+                        child: AppText('Title'),
+                      ),
+                    ],
+                  ),
+                IconButton(
+                  tooltip: context.tr('Refresh'),
+                  onPressed: _refreshing || activeScans.isNotEmpty
+                      ? null
+                      : _refreshHome,
+                  icon: _refreshing
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.refresh),
+                ),
+              ],
+            ),
+            if (_searchVisible && !widget.sourcesOnly)
+              SliverPadding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                sliver: SliverToBoxAdapter(
+                  child: TvTextField(
+                    controller: _librarySearchController,
+                    autofocus: true,
+                    onChanged: (value) {
+                      _librarySearchDebounce?.cancel();
+                      _librarySearchDebounce = Timer(
+                        const Duration(milliseconds: 250),
+                        () {
+                          if (mounted) setState(() => _librarySearch = value);
+                        },
+                      );
+                    },
+                    decoration: InputDecoration(
+                      labelText: context.tr('Search titles, episodes or files'),
+                      prefixIcon: const Icon(Icons.search),
+                    ),
                   ),
                 ),
               ),
-            ),
-            SliverPadding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-              sliver: SliverToBoxAdapter(
-                child: Wrap(
-                  spacing: 8,
-                  children: [
-                    ChoiceChip(
-                      label: const AppText('全部'),
-                      selected: _libraryKind == null,
-                      onSelected: (_) => setState(() {
-                        _libraryKind = null;
-                      }),
-                    ),
-                    ChoiceChip(
-                      label: const AppText('电影'),
-                      selected: _libraryKind == MediaTitleKind.movie,
-                      onSelected: (_) => setState(() {
-                        _libraryKind = MediaTitleKind.movie;
-                      }),
-                    ),
-                    ChoiceChip(
-                      label: const AppText('电视剧'),
-                      selected: _libraryKind == MediaTitleKind.tv,
-                      onSelected: (_) => setState(() {
-                        _libraryKind = MediaTitleKind.tv;
-                      }),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            if (activeScans.isNotEmpty)
+            if (activeScans.isNotEmpty || _openingRecent)
               SliverToBoxAdapter(
                 child: LinearProgressIndicator(
                   semanticsLabel: 'Scanning library',
@@ -764,115 +727,263 @@ class _HomeScreenState extends State<HomeScreen>
                   ),
                 ),
               ),
-            if (indexedTitles.isNotEmpty) ...[
-              SliverPadding(
-                padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-                sliver: SliverToBoxAdapter(
-                  child: AppText(
-                    '全部影片',
-                    style: theme.textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              ),
-              _folderGridSliver(
-                count: indexedTitles.length,
-                itemBuilder: (context, index) {
-                  final title = indexedTitles[index];
-                  final files = librarySnapshot
-                      .filesForTitle(title.id)
-                      .where(
-                        (file) =>
-                            file.availability != MediaAvailability.missing,
-                      )
-                      .toList();
-                  return MediaTitleCard(
-                    key: ValueKey(title.id),
-                    title: title,
-                    episodeCount: librarySnapshot.availableEpisodeCount(
-                      title.id,
-                    ),
-                    versionCount: files.length,
-                    onTap: () => Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (_) =>
-                            UnifiedTitleDetailsScreen(titleId: title.id),
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ],
-            // Source bookmarks remain available for direct file browsing.
-            if (_folders.isEmpty)
+
+            if (widget.sourcesOnly) ...[
               SliverToBoxAdapter(
                 child: Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-                  child: AppText(
-                    tv
-                        ? 'No folders yet. Use the buttons above to add one.'
-                        : 'No folders yet. Tap + to add one.',
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      color: theme.colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                ),
-              )
-            else ...[
-              SliverPadding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-                sliver: SliverToBoxAdapter(
-                  child: AppText(
-                    indexedTitles.isEmpty ? 'Your library' : '来源',
-                    style: theme.textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.w600,
-                    ),
+                  padding: const EdgeInsets.all(16),
+                  child: OutlinedButton.icon(
+                    onPressed: _showAddMenu,
+                    icon: const Icon(Icons.add),
+                    label: const AppText('Add a source'),
                   ),
                 ),
               ),
-              _folderGridSliver(
-                count: _folders.length,
-                itemBuilder: (context, index) {
-                  final folder = _folders[index];
-                  return FolderCard(
-                    key: ValueKey(folder.id),
-                    folder: folder,
-                    tmdbMeta: TmdService.instance.metaFor(folder.metadataKey),
-                    jellyfinInfo: _jellyfinMeta[folder.id],
-                    onTap: () => _openLibraryCard(folder),
-                    onBrowse: () => _openFolder(folder),
-                    onLongPress: () => _removeFolder(folder),
-                  );
-                },
-              ),
+              if (_folders.isEmpty)
+                const SliverFillRemaining(
+                  hasScrollBody: false,
+                  child: _EmptyLibrary(),
+                )
+              else
+                _folderGridSliver(
+                  count: _folders.length,
+                  itemBuilder: (context, index) {
+                    final folder = _folders[index];
+                    return FolderCard(
+                      key: ValueKey(folder.id),
+                      folder: folder,
+                      tmdbMeta: TmdService.instance.metaFor(folder.metadataKey),
+                      jellyfinInfo: _jellyfinMeta[folder.id],
+                      onTap: () => _openFolder(folder),
+                      onBrowse: () => _openFolder(folder),
+                      onLongPress: () => _removeFolder(folder),
+                    );
+                  },
+                ),
+            ] else ...[
+              if (_librarySearch.trim().isEmpty)
+                _shelf(
+                  label: 'Recently watched',
+                  count: recent.length,
+                  recent: true,
+                  builder: (context, index) => RecentLibraryCard(
+                    key: ValueKey('recent:${recent[index].key}'),
+                    item: recent[index],
+                    onTap: () => _playRecent(recent[index]),
+                    onRemove: () => _removeVideo(recent[index].entry),
+                  ),
+                ),
+              for (final kind in MediaTitleKind.values)
+                _posterShelf(
+                  kind,
+                  titles.where((title) => title.kind == kind).toList(),
+                ),
+              if (titles.isEmpty && _librarySearch.trim().isNotEmpty)
+                const SliverToBoxAdapter(
+                  child: Padding(
+                    padding: EdgeInsets.all(24),
+                    child: AppText('No matching titles'),
+                  ),
+                ),
+              if (snapshot.titles.isEmpty && _librarySearch.trim().isEmpty)
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      children: [
+                        const _EmptyLibrary(),
+                        FilledButton.icon(
+                          onPressed: _showAddMenu,
+                          icon: const Icon(Icons.add),
+                          label: const AppText('Add a source'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
             ],
-            // ---- Continue watching ----
-            SliverPadding(
-              padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-              sliver: SliverToBoxAdapter(
-                child: AppText(
-                  'Continue watching',
-                  style: theme.textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            ),
-            if (_entries.isEmpty)
-              const SliverFillRemaining(
-                hasScrollBody: false,
-                child: _EmptyLibrary(),
-              )
-            else
-              _buildContinueWatchingGrid(theme),
+            const SliverToBoxAdapter(child: SizedBox(height: 32)),
           ],
         ),
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _showAddMenu,
-        tooltip: context.tr('Add a source'),
-        child: const Icon(Icons.add),
+      floatingActionButton: widget.sourcesOnly
+          ? FloatingActionButton(
+              onPressed: _showAddMenu,
+              tooltip: context.tr('Add a source'),
+              child: const Icon(Icons.add),
+            )
+          : null,
+    );
+  }
+
+  Future<void> _refreshHome() async {
+    setState(() => _refreshing = true);
+    try {
+      await _loadLibrary();
+      await _unifiedLibrary.refresh(_folders);
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: AppText('Could not refresh library. Please try again.'),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _refreshing = false);
+    }
+  }
+
+  Widget _posterShelf(MediaTitleKind kind, List<MediaTitle> titles) => _shelf(
+    label: kind == MediaTitleKind.movie ? 'Movies' : 'TV shows',
+    count: titles.length,
+    builder: (_, index) => LibraryPosterCard(
+      key: ValueKey(titles[index].id),
+      title: titles[index],
+      onTap: () => Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => UnifiedTitleDetailsScreen(titleId: titles[index].id),
+        ),
+      ),
+    ),
+  );
+
+  Widget _shelf({
+    required String label,
+    required int count,
+    required IndexedWidgetBuilder builder,
+    bool recent = false,
+  }) {
+    return SliverToBoxAdapter(
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final width = constraints.maxWidth;
+          // Four complete posters on phones; keep comfortable sizes on tablets.
+          final columns = width < 600 ? 4 : (width / 140).floor().clamp(4, 10);
+          final itemWidth = recent
+              ? (width * .78).clamp(220.0, 440.0)
+              : (width - 32 - (columns - 1) * 8) / columns;
+          final scale = MediaQuery.textScalerOf(context);
+          final height = recent
+              ? itemWidth * 9 / 16 + scale.scale(42) + 16
+              : itemWidth * 3 / 2 + scale.scale(38) + 16;
+          return Padding(
+            padding: const EdgeInsets.only(top: 24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  child: TextButton(
+                    onPressed: count == 0
+                        ? null
+                        : () => _showAll(label, count, builder, recent),
+                    style: TextButton.styleFrom(
+                      foregroundColor: Theme.of(context).colorScheme.onSurface,
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                      minimumSize: const Size(48, 48),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        AppText(
+                          label,
+                          style: const TextStyle(
+                            fontSize: 21,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          '$count',
+                          style: TextStyle(
+                            fontSize: 17,
+                            color: Theme.of(
+                              context,
+                            ).colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                        const Icon(
+                          Icons.chevron_right,
+                          color: Colors.white38,
+                          size: 22,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                if (count > 0)
+                  SizedBox(
+                    height: height,
+                    child: ListView.separated(
+                      key: PageStorageKey('shelf:$label'),
+                      scrollDirection: Axis.horizontal,
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      itemCount: count,
+                      separatorBuilder: (_, _) =>
+                          SizedBox(width: recent ? 12 : 8),
+                      itemBuilder: (context, index) => SizedBox(
+                        width: itemWidth,
+                        child: builder(context, index),
+                      ),
+                    ),
+                  )
+                else
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: AppText(
+                      recent
+                          ? 'Videos you play will appear here.'
+                          : 'No titles yet',
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  void _showAll(
+    String label,
+    int count,
+    IndexedWidgetBuilder builder,
+    bool recent,
+  ) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) => Scaffold(
+          appBar: AppBar(title: AppText(label)),
+          body: LayoutBuilder(
+            builder: (context, constraints) {
+              final columns = recent
+                  ? (constraints.maxWidth / 320).floor().clamp(1, 4)
+                  : constraints.maxWidth < 600
+                  ? 4
+                  : (constraints.maxWidth / 140).floor().clamp(4, 10);
+              final width =
+                  (constraints.maxWidth - 32 - 8 * (columns - 1)) / columns;
+              return GridView.builder(
+                padding: const EdgeInsets.all(16),
+                itemCount: count,
+                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: columns,
+                  crossAxisSpacing: 8,
+                  mainAxisSpacing: 16,
+                  mainAxisExtent:
+                      width * (recent ? 9 / 16 : 3 / 2) +
+                      MediaQuery.textScalerOf(context).scale(recent ? 58 : 54),
+                ),
+                itemBuilder: builder,
+              );
+            },
+          ),
+        ),
       ),
     );
   }
@@ -882,15 +993,6 @@ class _HomeScreenState extends State<HomeScreen>
     final roots = _folders.where((folder) => ids.contains(folder.id)).toList();
     if (roots.isEmpty) return;
     await _unifiedLibrary.refresh(roots);
-  }
-
-  int _newestDiscoveryForTitle(LibrarySnapshot snapshot, String titleId) {
-    var newest = 0;
-    for (final file in snapshot.filesForTitle(titleId)) {
-      final value = file.discoveredAt?.millisecondsSinceEpoch ?? 0;
-      if (value > newest) newest = value;
-    }
-    return newest;
   }
 
   bool _matchesLibrarySearch(
@@ -913,88 +1015,6 @@ class _HomeScreenState extends State<HomeScreen>
     return snapshot
         .filesForTitle(title.id)
         .any((file) => file.originalFileName.toLowerCase().contains(needle));
-  }
-
-  /// A responsive grid of video cards (columns from the screen width), shared
-  /// by the "Continue watching" section.
-  Widget _videoGridSliver({
-    required int count,
-    required Widget Function(BuildContext, int) itemBuilder,
-  }) {
-    return SliverPadding(
-      padding: const EdgeInsets.all(16),
-      sliver: SliverLayoutBuilder(
-        builder: (context, constraints) {
-          final width = constraints.crossAxisExtent;
-          final columns = _columnsForWidth(width);
-          const spacing = 14.0;
-          final itemWidth = (width - spacing * (columns - 1)) / columns;
-          final itemHeight = itemWidth * 9 / 16 + _textBlockHeight;
-          return SliverGrid(
-            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: columns,
-              mainAxisSpacing: spacing,
-              crossAxisSpacing: spacing,
-              mainAxisExtent: itemHeight,
-            ),
-            delegate: SliverChildBuilderDelegate(
-              itemBuilder,
-              childCount: count,
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  /// Builds the continue-watching grid, grouping TV episodes by show
-  /// (Nova-style). Movies and standalone videos pass through ungrouped.
-  Widget _buildContinueWatchingGrid(ThemeData theme) {
-    final grouped = _groupedByShow(_entries);
-    return _videoGridSliver(
-      count: grouped.length,
-      itemBuilder: (context, index) {
-        final group = grouped[index];
-        if (group.isSeries) {
-          // TV show card: show poster + latest episode info.
-          final entry = group.mostRecent;
-          final video = entry.video;
-          final progress = video.duration > Duration.zero
-              ? (entry.position.inMilliseconds / video.duration.inMilliseconds)
-                    .clamp(0.0, 1.0)
-              : null;
-          return VideoCard(
-            key: ValueKey(video.resumeKey ?? video.uri ?? video.title),
-            video: video,
-            tmdbMeta: group.showMeta,
-            progress: progress,
-            subtitle: group.cardSubtitle(_positionLabel),
-            onTap: () => _openVideo(entry),
-            onLongPress: () => _removeVideo(entry),
-          );
-        }
-        // Single entry (movie or unmatched episode).
-        final entry = group.entries.first;
-        final video = entry.video;
-        final progress = video.duration > Duration.zero
-            ? (entry.position.inMilliseconds / video.duration.inMilliseconds)
-                  .clamp(0.0, 1.0)
-            : null;
-        final parsed = ParsedFileName.parse(video.title);
-        final continueLabel = 'Continue from ${_positionLabel(entry.position)}';
-        return VideoCard(
-          key: ValueKey(video.resumeKey ?? video.uri ?? video.title),
-          video: video,
-          tmdbMeta: TmdService.instance.metaFor(TmdStore.identityKeyFor(video)),
-          progress: progress,
-          subtitle: parsed.isEpisode
-              ? '${parsed.episodeLabel} · $continueLabel'
-              : continueLabel,
-          onTap: () => _openVideo(entry),
-          onLongPress: () => _removeVideo(entry),
-        );
-      },
-    );
   }
 
   /// A responsive grid of folder cards with poster-sized cells (2:3).
@@ -1242,16 +1262,6 @@ class _HomeScreenState extends State<HomeScreen>
   static String _encodePath(String path) =>
       path.split('/').map(Uri.encodeComponent).join('/');
 
-  static String _positionLabel(Duration position) {
-    final h = position.inHours;
-    final m = position.inMinutes.remainder(60);
-    final s = position.inSeconds.remainder(60);
-    if (h > 0) {
-      return '$h:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
-    }
-    return '$m:${s.toString().padLeft(2, '0')}';
-  }
-
   static const double _textBlockHeight = 84;
 }
 
@@ -1292,44 +1302,5 @@ class _EmptyLibrary extends StatelessWidget {
         ),
       ),
     );
-  }
-}
-
-/// A grouped continue-watching entry: either a single video (movie/standalone)
-/// or a TV show with multiple episode entries clustered together.
-class _GroupedContinueWatching {
-  _GroupedContinueWatching({
-    required this.showTitle,
-    required this.showMeta,
-    required this.entries,
-  });
-
-  final String showTitle;
-  final TmdMeta? showMeta;
-  final List<ContinueWatchingEntry> entries;
-
-  /// Whether this represents a TV show with multiple episodes.
-  bool get isSeries => entries.length > 1;
-
-  /// The most recently played entry (first in the list after sorting).
-  ContinueWatchingEntry get mostRecent => entries.first;
-
-  /// The show's poster URL for the card image.
-  String? get posterUrl => showMeta?.movie.posterUrl();
-
-  /// The show's backdrop URL for the card image.
-  String? get backdropUrl => showMeta?.movie.backdropUrl();
-
-  /// Subtitle for the card: "S01E03 · Continue from 12:34" or just
-  /// "Continue from 12:34" for a single entry.
-  String cardSubtitle(String Function(Duration) positionLabel) {
-    final entry = mostRecent;
-    final parsed = ParsedFileName.parse(entry.video.title);
-    final continueLabel = 'Continue from ${positionLabel(entry.position)}';
-    if (isSeries) {
-      final epLabel = parsed.isEpisode ? parsed.episodeLabel : '';
-      return epLabel.isNotEmpty ? '$epLabel · $continueLabel' : continueLabel;
-    }
-    return continueLabel;
   }
 }
