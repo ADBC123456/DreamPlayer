@@ -107,6 +107,26 @@ class DanmakuBindingStore {
     bool manual = true,
   }) => saveAll(scope, {videoIdentity: ref}, manual: manual);
 
+  static Future<void> remove({
+    required String sourceId,
+    required String sourceBaseUrl,
+    required String videoIdentity,
+  }) {
+    return _enqueueWrite(() async {
+      final prefs = await SharedPreferences.getInstance();
+      final root = await _readRoot(prefs: prefs);
+      final sources = _sources(root);
+      final sourceKey = _sourceKey(sourceId, sourceBaseUrl);
+      final rawBucket = sources[sourceKey];
+      if (rawBucket is! Map) return;
+      final bucket = Map<String, dynamic>.from(rawBucket);
+      if (bucket.remove(videoIdentity) == null) return;
+      sources[sourceKey] = bucket;
+      root['sources'] = sources;
+      await prefs.setString(_prefsKey, jsonEncode(root));
+    });
+  }
+
   /// Saves [bindings] atomically. Keys in [replaceVideoIdentities] that have
   /// no new binding are removed, which lets a batch replace its entire scope
   /// without leaving stale episode choices behind.

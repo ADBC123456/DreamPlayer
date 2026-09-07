@@ -23,7 +23,7 @@ import '../source/danmaku_source_registry.dart';
 
 /// Bump when the on-disk entry format changes; old entries become unreadable
 /// (different file name) and are re-fetched.
-const int kDanmakuCacheSchemaVersion = 1;
+const int kDanmakuCacheSchemaVersion = 2;
 
 /// One cached danmaku entry bound to (sourceId, baseUrl, video identity).
 class DanmakuCacheEntry {

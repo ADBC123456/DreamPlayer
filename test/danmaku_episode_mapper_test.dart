@@ -92,6 +92,19 @@ void main() {
       expect(cn.special, SpecialKind.special);
     });
 
+    test('preview titles never parse as numbered full episodes', () {
+      for (final title in [
+        '【bilibili1】 星海飞驰第1集预告',
+        'Show S01E02 Preview',
+        'Show EP03 Trailer',
+        'Show 第4集先导片',
+      ]) {
+        final parsed = DanmakuEpisodeParser.parse(title);
+        expect(parsed.source, EpisodeSource.special, reason: title);
+        expect(parsed.episode, 0, reason: title);
+      }
+    });
+
     test('non-episodes stay non-episodes', () {
       // Resolution tokens must not parse as episode numbers.
       expect(DanmakuEpisodeParser.parse('1080p.mkv').isEpisode, isFalse);
@@ -157,6 +170,7 @@ void main() {
       expect(n('EP12 x'), 12);
       expect(n('12. Foo'), 12);
       expect(n('OVA'), 0);
+      expect(n('【bilibili1】 星海飞驰第12集预告'), 0);
       expect(n(''), 0);
     });
   });
@@ -205,6 +219,44 @@ void main() {
       );
       expect(m.status, EpisodeMatchStatus.duplicate);
       expect(m.candidates.map((c) => c.episodeId), ['1', '2']);
+    });
+
+    test('preview with the same number is ignored for automatic mapping', () {
+      final entries = [
+        DanmuCatalogEpisode.fromJson({
+          'episodeId': 'preview-1',
+          'episodeTitle': '【bilibili1】 星海飞驰第1集预告',
+        }),
+        DanmuCatalogEpisode.fromJson({
+          'episodeId': 'full-1',
+          'episodeTitle': '第1集 风起天南',
+        }),
+      ];
+      final match = DanmuEpisodeMapper.match(
+        DanmakuEpisodeParser.parse('凡人修仙传.S01E01.mkv'),
+        entries,
+      );
+
+      expect(match.status, EpisodeMatchStatus.mapped);
+      expect(match.episode?.episodeId, 'full-1');
+      expect(
+        DanmuEpisodeMapper.specialsOf(entries).single.episodeId,
+        'preview-1',
+      );
+    });
+
+    test('preview-only catalog has no automatic numbered match', () {
+      final match = DanmuEpisodeMapper.match(
+        DanmakuEpisodeParser.parse('凡人修仙传.S01E01.mkv'),
+        [
+          DanmuCatalogEpisode.fromJson({
+            'episodeId': 'preview-1',
+            'episodeTitle': '星海飞驰第1集预告',
+          }),
+        ],
+      );
+
+      expect(match.status, EpisodeMatchStatus.missing);
     });
 
     test('specials map by title candidates, never by number', () {

@@ -91,4 +91,20 @@ void main() {
     final loaded = await DanmakuBindingStore.loadForScope(_scope);
     expect(loaded.keys, containsAll(<String>['video-1', 'video-2']));
   });
+
+  test('remove deletes only the requested binding', () async {
+    await DanmakuBindingStore.saveAll(_scope, const {
+      'video-1': DanmakuEpisodeRef(animeId: 'a', episodeId: '1'),
+      'video-2': DanmakuEpisodeRef(animeId: 'a', episodeId: '2'),
+    });
+
+    await DanmakuBindingStore.remove(
+      sourceId: _scope.sourceId,
+      sourceBaseUrl: _scope.sourceBaseUrl,
+      videoIdentity: 'video-1',
+    );
+
+    final loaded = await DanmakuBindingStore.loadForScope(_scope);
+    expect(loaded.keys, ['video-2']);
+  });
 }

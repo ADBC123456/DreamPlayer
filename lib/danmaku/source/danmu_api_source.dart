@@ -23,6 +23,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import '../model/episode_title_classifier.dart';
 import '../model/danmaku_models.dart' as parsed_models;
 import 'danmu_api_comment_parser.dart';
 import 'danmaku_source_registry.dart';
@@ -222,8 +223,10 @@ class DanmuApiSource implements DanmakuSource {
     final matches = decoded['matches'];
     if (matches is! List || matches.isEmpty) return null;
     final validMatches = matches.whereType<Map>().where((entry) {
+      final episodeTitle = '${entry['episodeTitle'] ?? ''}';
       return _stringId(entry['episodeId']) != null &&
-          _stringId(entry['animeId']) != null;
+          _stringId(entry['animeId']) != null &&
+          !isDanmakuPromotionalEpisodeTitle(episodeTitle);
     }).toList();
     if (validMatches.isEmpty) return null;
     final distinctEpisodes = validMatches
