@@ -401,7 +401,7 @@ class VideoItem {
     );
   }
 
-  VideoItem withMetadataContext(VideoMetadataContext context) => VideoItem(
+  VideoItem withMetadataContext(VideoMetadataContext? context) => VideoItem(
     id: id,
     title: title,
     path: path,

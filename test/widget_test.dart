@@ -12,17 +12,19 @@ void main() {
   testWidgets('App shows library and settings shell', (tester) async {
     await tester.pumpWidget(const DreamPlayerApp());
 
-    expect(find.text('影视库'), findsOneWidget);
-    expect(find.text('继续观看'), findsOneWidget);
-    expect(find.text('暂无内容'), findsOneWidget);
+    expect(find.text('DreamPlayer'), findsOneWidget);
+    expect(find.text('最近观看'), findsOneWidget);
+    expect(find.text('电影'), findsOneWidget);
+    expect(find.text('电视剧'), findsOneWidget);
     expect(find.text('媒体库'), findsOneWidget);
-    expect(find.text('设置'), findsOneWidget);
+    expect(find.text('我的'), findsOneWidget);
+    expect(find.text('资源库'), findsOneWidget);
   });
 
   testWidgets('Switching to settings tab shows settings', (tester) async {
     await tester.pumpWidget(const DreamPlayerApp());
 
-    await tester.tap(find.text('设置'));
+    await tester.tap(find.text('我的'));
     await tester.pumpAndSettle();
 
     expect(find.text('支持'), findsOneWidget);
@@ -43,7 +45,7 @@ void main() {
   testWidgets('About lists open-source licenses', (tester) async {
     await tester.pumpWidget(const DreamPlayerApp());
 
-    await tester.tap(find.text('设置'));
+    await tester.tap(find.text('我的'));
     await tester.pumpAndSettle();
 
     await tester.scrollUntilVisible(
@@ -78,7 +80,7 @@ void main() {
     );
     await tester.pumpWidget(const DreamPlayerApp());
 
-    await tester.tap(find.text('设置'));
+    await tester.tap(find.text('我的'));
     await tester.pumpAndSettle();
 
     await tester.scrollUntilVisible(
@@ -164,6 +166,8 @@ void main() {
     await tester.pumpWidget(const DreamPlayerApp());
     await tester.pumpAndSettle();
 
+    await tester.tap(find.text('资源库'));
+    await tester.pumpAndSettle();
     await tester.tap(find.byType(FloatingActionButton));
     await tester.pumpAndSettle();
 

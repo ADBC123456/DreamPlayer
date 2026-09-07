@@ -177,9 +177,12 @@ class _RootShellState extends State<RootShell> {
         body: MediaQuery(
           data: padded,
           child: IndexedStack(
-            index: _selectedIndex,
+            index: _selectedIndex == 2 ? 1 : 0,
             children: [
-              HomeScreen(refreshTick: _homeRefreshTick),
+              HomeScreen(
+                refreshTick: _homeRefreshTick,
+                sourcesOnly: _selectedIndex == 1,
+              ),
               const SettingsScreen(),
             ],
           ),
@@ -194,14 +197,19 @@ class _RootShellState extends State<RootShell> {
           },
           destinations: [
             NavigationDestination(
-              icon: const Icon(Icons.video_library_outlined),
-              selectedIcon: const Icon(Icons.video_library),
+              icon: const Icon(Icons.smart_display_outlined),
+              selectedIcon: const Icon(Icons.smart_display),
               label: context.tr('Library'),
             ),
             NavigationDestination(
-              icon: const Icon(Icons.settings_outlined),
-              selectedIcon: const Icon(Icons.settings),
-              label: context.tr('Settings'),
+              icon: const Icon(Icons.folder_outlined),
+              selectedIcon: const Icon(Icons.folder),
+              label: context.tr('Source library'),
+            ),
+            NavigationDestination(
+              icon: const Icon(Icons.person_outline),
+              selectedIcon: const Icon(Icons.person),
+              label: context.tr('My'),
             ),
           ],
         ),
