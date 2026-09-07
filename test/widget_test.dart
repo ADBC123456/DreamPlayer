@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:dream_player/app.dart';
 import 'package:dream_player/models/video_item.dart';
@@ -9,6 +10,57 @@ import 'package:dream_player/screens/player_screen.dart';
 import 'package:dream_player/widgets/format_chip.dart';
 
 void main() {
+  testWidgets('resource library shows saved WebDAV servers as shortcuts', (
+    tester,
+  ) async {
+    SharedPreferences.setMockInitialValues({});
+    var openedServer = '';
+    var listServerCalls = 0;
+    const channel = MethodChannel('dreamplayer/webdav');
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+      call,
+    ) async {
+      if (call.method == 'listServers') {
+        listServerCalls++;
+        return [
+          {
+            'id': 'server-j',
+            'name': 'j',
+            'url': 'http://192.168.6.213:5244/dav',
+            'username': '',
+            'hasPassword': false,
+          },
+        ];
+      }
+      if (call.method == 'listDirectory') {
+        openedServer = (call.arguments as Map)['id'] as String;
+        return <Map<String, Object?>>[];
+      }
+      return null;
+    });
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        null,
+      ),
+    );
+
+    await tester.pumpWidget(const DreamPlayerApp());
+    await tester.pumpAndSettle();
+    expect(listServerCalls, greaterThan(0));
+    await tester.tap(find.text('资源库'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('已保存的服务器'), findsOneWidget);
+    expect(find.text('j'), findsOneWidget);
+    expect(find.text('http://192.168.6.213:5244/dav'), findsOneWidget);
+    expect(find.text('凡人修仙传'), findsNothing);
+
+    await tester.tap(find.text('j'));
+    await tester.pumpAndSettle();
+    expect(openedServer, 'server-j');
+  });
+
   testWidgets('App shows library and settings shell', (tester) async {
     await tester.pumpWidget(const DreamPlayerApp());
 

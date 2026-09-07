@@ -13,11 +13,12 @@ import '../library/title_playback_preferences.dart';
 import '../models/video_item.dart';
 import '../services/continue_watching.dart';
 import '../services/file_browser.dart';
+import '../services/ftp_client.dart';
 import '../services/jellyfin_client.dart';
 import '../services/library_folders.dart';
+import '../services/smb_client.dart';
 import '../services/tmdb_client.dart';
 import '../services/webdav_client.dart';
-import '../widgets/folder_card.dart';
 import '../widgets/library_home_cards.dart';
 import '../services/recent_library_items.dart';
 import '../widgets/tv_text_field.dart';
@@ -30,7 +31,6 @@ import '../utils/file_info_extractor.dart';
 import '../utils/startup_permissions.dart';
 import 'smb_screen.dart';
 import 'folder_screen.dart';
-import 'tmd_details_screen.dart';
 import 'upnp_screen.dart';
 import 'unified_title_details_screen.dart';
 import 'webdav_screen.dart';
@@ -67,6 +67,7 @@ class _HomeScreenState extends State<HomeScreen>
   /// "Your library": the folders the user added (e.g. TV-show folders), most
   /// recently added first. Nothing is auto-scanned — only these appear.
   List<LibraryFolder> _folders = const [];
+  List<_SavedSource> _savedSources = const [];
 
   /// Cached server-side metadata for the [JellyfinItemInfo] folders, keyed by
   /// `LibraryFolder.id` (fetch-on-bookmark, refreshed on open).
@@ -149,7 +150,7 @@ class _HomeScreenState extends State<HomeScreen>
 
   Future<void> _loadLibrary() async {
     final entries = await ContinueWatchingStore.load();
-    _loadLibraryFolders();
+    await _loadLibraryFolders();
     if (mounted) {
       setState(() => _entries = entries);
     }
@@ -160,14 +161,95 @@ class _HomeScreenState extends State<HomeScreen>
   /// lookups so each folder card can show the show's poster.
   Future<void> _loadLibraryFolders() async {
     final folders = await LibraryFoldersStore.load();
-    final metas = await _client.loadAllFolderMeta();
     if (mounted) {
-      setState(() {
-        _folders = folders;
-        _jellyfinMeta = metas;
-      });
+      setState(() => _folders = folders);
     }
+    unawaited(_loadSavedSources(folders));
+    final metas = await _client.loadAllFolderMeta();
+    if (mounted) setState(() => _jellyfinMeta = metas);
     _refreshJellyfinMeta(folders);
+  }
+
+  Future<void> _loadSavedSources(List<LibraryFolder> folders) async {
+    final sources = <_SavedSource>[
+      for (final folder in folders.where(
+        (folder) => folder.source == LibraryFolderSource.files,
+      ))
+        _SavedSource(
+          id: 'files:${folder.id}',
+          kind: _SavedSourceKind.files,
+          name: folder.name,
+          subtitle: folder.path,
+          icon: Icons.folder_rounded,
+          folder: folder,
+        ),
+    ];
+    void publish() {
+      if (mounted) setState(() => _savedSources = List.of(sources));
+    }
+
+    publish();
+    try {
+      for (final server in await WebDavClient.instance.listServers()) {
+        sources.add(
+          _SavedSource(
+            id: 'webdav:${server.id}',
+            kind: _SavedSourceKind.webdav,
+            name: server.name,
+            subtitle: server.url,
+            icon: Icons.cloud_rounded,
+            serverId: server.id,
+          ),
+        );
+      }
+      publish();
+    } catch (_) {}
+    try {
+      for (final server in await SmbClient.instance.listServers()) {
+        sources.add(
+          _SavedSource(
+            id: 'smb:${server.id}',
+            kind: _SavedSourceKind.smb,
+            name: server.name,
+            subtitle: 'SMB · ${server.host}:${server.port}',
+            icon: Icons.lan_rounded,
+            serverId: server.id,
+          ),
+        );
+      }
+      publish();
+    } catch (_) {}
+    try {
+      for (final server in await FtpClient.instance.listServers()) {
+        sources.add(
+          _SavedSource(
+            id: 'ftp:${server.id}',
+            kind: _SavedSourceKind.ftp,
+            name: server.name,
+            subtitle:
+                '${server.protocolLabel} · ${server.host}:${server.port}${server.path}',
+            icon: Icons.cloud_queue_rounded,
+            serverId: server.id,
+          ),
+        );
+      }
+      publish();
+    } catch (_) {}
+    try {
+      for (final server in await _client.loadServers()) {
+        sources.add(
+          _SavedSource(
+            id: 'jellyfin:${server.url}',
+            kind: _SavedSourceKind.jellyfin,
+            name: server.name,
+            subtitle: 'Jellyfin / Emby · ${server.url}',
+            icon: Icons.dns_rounded,
+            serverId: server.url,
+          ),
+        );
+      }
+      publish();
+    } catch (_) {}
   }
 
   /// Best-effort server-side metadata for the Jellyfin library folders: any
@@ -260,42 +342,6 @@ class _HomeScreenState extends State<HomeScreen>
     );
     // TMDB poster for the new card resolves in the background.
     _resolveFolderMetadata([folder]);
-  }
-
-  /// Opens a library folder: the show/movie details screen with the folder's
-  /// files (episodes) listed below it.
-  Future<void> _openFolder(LibraryFolder folder) async {
-    if (folder.source == LibraryFolderSource.webdav) {
-      await Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (_) => WebDavScreen(initialFolder: folder),
-        ),
-      );
-      await _loadLibrary();
-      return;
-    }
-    // Network bookmarks (SMB/WebDAV) open the folder browser directly
-    // so the file list appears immediately — TmdDetailsScreen's file list
-    // only knows FileBrowser/Jellyfin.
-    if (folder.source == LibraryFolderSource.smb ||
-        folder.source == LibraryFolderSource.webdav ||
-        folder.source == LibraryFolderSource.ftp ||
-        folder.source == LibraryFolderSource.upnp) {
-      await Navigator.of(context).push(
-        MaterialPageRoute<void>(builder: (_) => FolderScreen(folder: folder)),
-      );
-      await _loadLibrary();
-      return;
-    }
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => TmdDetailsScreen(
-          folder: folder,
-          jellyfinInfo: _jellyfinMeta[folder.id],
-        ),
-      ),
-    );
-    await _loadLibrary();
   }
 
   Future<void> _removeFolder(LibraryFolder folder) async {
@@ -641,6 +687,8 @@ class _HomeScreenState extends State<HomeScreen>
                   tooltip: context.tr('Refresh'),
                   onPressed: _refreshing || activeScans.isNotEmpty
                       ? null
+                      : widget.sourcesOnly
+                      ? _refreshSources
                       : _refreshHome,
                   icon: _refreshing
                       ? const SizedBox(
@@ -675,14 +723,15 @@ class _HomeScreenState extends State<HomeScreen>
                   ),
                 ),
               ),
-            if (activeScans.isNotEmpty || _openingRecent)
+            if (!widget.sourcesOnly &&
+                (activeScans.isNotEmpty || _openingRecent))
               SliverToBoxAdapter(
                 child: LinearProgressIndicator(
                   semanticsLabel: 'Scanning library',
                   minHeight: 3,
                 ),
               ),
-            if (activeScans.isNotEmpty)
+            if (!widget.sourcesOnly && activeScans.isNotEmpty)
               SliverToBoxAdapter(
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
@@ -708,7 +757,7 @@ class _HomeScreenState extends State<HomeScreen>
                   ),
                 ),
               ),
-            if (failedScans.isNotEmpty)
+            if (!widget.sourcesOnly && failedScans.isNotEmpty)
               SliverToBoxAdapter(
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
@@ -731,32 +780,35 @@ class _HomeScreenState extends State<HomeScreen>
             if (widget.sourcesOnly) ...[
               SliverToBoxAdapter(
                 child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: OutlinedButton.icon(
-                    onPressed: _showAddMenu,
-                    icon: const Icon(Icons.add),
-                    label: const AppText('Add a source'),
+                  padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
+                  child: AppText(
+                    'Saved servers',
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      color: theme.colorScheme.primary,
+                      fontWeight: FontWeight.w700,
+                    ),
                   ),
                 ),
               ),
-              if (_folders.isEmpty)
-                const SliverFillRemaining(
+              if (_savedSources.isEmpty)
+                SliverFillRemaining(
                   hasScrollBody: false,
-                  child: _EmptyLibrary(),
+                  child: _EmptySources(onAdd: _showAddMenu),
                 )
               else
-                _folderGridSliver(
-                  count: _folders.length,
+                SliverList.builder(
+                  itemCount: _savedSources.length,
                   itemBuilder: (context, index) {
-                    final folder = _folders[index];
-                    return FolderCard(
-                      key: ValueKey(folder.id),
-                      folder: folder,
-                      tmdbMeta: TmdService.instance.metaFor(folder.metadataKey),
-                      jellyfinInfo: _jellyfinMeta[folder.id],
-                      onTap: () => _openFolder(folder),
-                      onBrowse: () => _openFolder(folder),
-                      onLongPress: () => _removeFolder(folder),
+                    final source = _savedSources[index];
+                    return SavedSourceTile(
+                      key: ValueKey(source.id),
+                      name: source.name,
+                      subtitle: source.subtitle,
+                      icon: source.icon,
+                      onTap: () => _openSavedSource(source),
+                      onLongPress: source.folder == null
+                          ? null
+                          : () => _removeFolder(source.folder!),
                     );
                   },
                 ),
@@ -829,6 +881,15 @@ class _HomeScreenState extends State<HomeScreen>
           ),
         );
       }
+    } finally {
+      if (mounted) setState(() => _refreshing = false);
+    }
+  }
+
+  Future<void> _refreshSources() async {
+    setState(() => _refreshing = true);
+    try {
+      await _loadSavedSources(_folders);
     } finally {
       if (mounted) setState(() => _refreshing = false);
     }
@@ -1017,35 +1078,20 @@ class _HomeScreenState extends State<HomeScreen>
         .any((file) => file.originalFileName.toLowerCase().contains(needle));
   }
 
-  /// A responsive grid of folder cards with poster-sized cells (2:3).
-  Widget _folderGridSliver({
-    required int count,
-    required Widget Function(BuildContext, int) itemBuilder,
-  }) {
-    return SliverPadding(
-      padding: const EdgeInsets.all(16),
-      sliver: SliverLayoutBuilder(
-        builder: (context, constraints) {
-          final width = constraints.crossAxisExtent;
-          final columns = _columnsForWidth(width);
-          const spacing = 14.0;
-          final itemWidth = (width - spacing * (columns - 1)) / columns;
-          final itemHeight = itemWidth * 3 / 2 + _textBlockHeight;
-          return SliverGrid(
-            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: columns,
-              mainAxisSpacing: spacing,
-              crossAxisSpacing: spacing,
-              mainAxisExtent: itemHeight,
-            ),
-            delegate: SliverChildBuilderDelegate(
-              itemBuilder,
-              childCount: count,
-            ),
-          );
-        },
+  Future<void> _openSavedSource(_SavedSource source) async {
+    final Widget screen = switch (source.kind) {
+      _SavedSourceKind.files => FolderScreen(folder: source.folder!),
+      _SavedSourceKind.webdav => WebDavScreen(initialServerId: source.serverId),
+      _SavedSourceKind.smb => SmbScreen(initialServerId: source.serverId),
+      _SavedSourceKind.ftp => FtpScreen(initialServerId: source.serverId),
+      _SavedSourceKind.jellyfin => JellyfinScreen(
+        initialServerUrl: source.serverId,
       ),
-    );
+    };
+    await Navigator.of(
+      context,
+    ).push(MaterialPageRoute<void>(builder: (_) => screen));
+    await _loadLibrary();
   }
 
   /// Opens the "+" menu: WebDAV server, internal storage, add folder, Jellyfin.
@@ -1250,19 +1296,10 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
-  static int _columnsForWidth(double width) {
-    if (width >= 1000) return 6;
-    if (width >= 760) return 4;
-    if (width >= 480) return 3;
-    return 2;
-  }
-
   /// Percent-encodes each path segment (mirrors `_encodePath` in
   /// `webdav_screen.dart`).
   static String _encodePath(String path) =>
       path.split('/').map(Uri.encodeComponent).join('/');
-
-  static const double _textBlockHeight = 84;
 }
 
 class _EmptyLibrary extends StatelessWidget {
@@ -1303,4 +1340,68 @@ class _EmptyLibrary extends StatelessWidget {
       ),
     );
   }
+}
+
+class _EmptySources extends StatelessWidget {
+  const _EmptySources({required this.onAdd});
+
+  final VoidCallback onAdd;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.cloud_outlined,
+              size: 64,
+              color: colors.onSurfaceVariant.withValues(alpha: .6),
+            ),
+            const SizedBox(height: 16),
+            const AppText(
+              'No saved servers',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 8),
+            AppText(
+              'Tap + to add a source.',
+              style: TextStyle(color: colors.onSurfaceVariant),
+            ),
+            const SizedBox(height: 20),
+            FilledButton.icon(
+              onPressed: onAdd,
+              icon: const Icon(Icons.add),
+              label: const AppText('Add a source'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+enum _SavedSourceKind { files, webdav, smb, ftp, jellyfin }
+
+class _SavedSource {
+  const _SavedSource({
+    required this.id,
+    required this.kind,
+    required this.name,
+    required this.subtitle,
+    required this.icon,
+    this.serverId,
+    this.folder,
+  });
+
+  final String id;
+  final _SavedSourceKind kind;
+  final String name;
+  final String subtitle;
+  final IconData icon;
+  final String? serverId;
+  final LibraryFolder? folder;
 }

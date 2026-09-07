@@ -25,9 +25,10 @@ String _encodePath(String path) =>
 /// WebDAV browser: saved servers -> folders -> videos. Playback streams the
 /// plain HTTP file URL to the player with the server's Basic auth header.
 class WebDavScreen extends StatefulWidget {
-  const WebDavScreen({super.key, this.initialFolder});
+  const WebDavScreen({super.key, this.initialFolder, this.initialServerId});
 
   final LibraryFolder? initialFolder;
+  final String? initialServerId;
 
   @override
   State<WebDavScreen> createState() => _WebDavScreenState();
@@ -57,16 +58,16 @@ class _WebDavScreenState extends State<WebDavScreen> {
   Future<void> _initialize() async {
     await _loadServers();
     final folder = widget.initialFolder;
-    if (!mounted || folder == null) return;
-    final server = _servers
-        .where((s) => s.id == folder.networkServerId)
-        .firstOrNull;
+    if (!mounted) return;
+    final requestedServerId = folder?.networkServerId ?? widget.initialServerId;
+    if (requestedServerId == null) return;
+    final server = _servers.where((s) => s.id == requestedServerId).firstOrNull;
     if (server == null) {
       setState(() => _error = '来源服务器已移除，请重新添加');
       return;
     }
     _browsing = server;
-    await _loadDirectory(folder.networkPath ?? '/');
+    await _loadDirectory(folder?.networkPath ?? '/');
   }
 
   @override

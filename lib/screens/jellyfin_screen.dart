@@ -14,7 +14,9 @@ import '../l10n/app_localizations.dart';
 /// -> play. Playback streams the direct-play URL (token as `api_key` query
 /// param) through the existing HTTP data sources on both platforms.
 class JellyfinScreen extends StatefulWidget {
-  const JellyfinScreen({super.key});
+  const JellyfinScreen({super.key, this.initialServerUrl});
+
+  final String? initialServerUrl;
 
   @override
   State<JellyfinScreen> createState() => _JellyfinScreenState();
@@ -48,7 +50,16 @@ class _JellyfinScreenState extends State<JellyfinScreen> {
   void initState() {
     super.initState();
     TmdService.instance.addListener(_onMetadataChanged);
-    _loadServers();
+    _initialize();
+  }
+
+  Future<void> _initialize() async {
+    await _loadServers();
+    if (!mounted || widget.initialServerUrl == null) return;
+    final server = _servers
+        .where((s) => s.url == widget.initialServerUrl)
+        .firstOrNull;
+    if (server != null) await _openServer(server);
   }
 
   @override
