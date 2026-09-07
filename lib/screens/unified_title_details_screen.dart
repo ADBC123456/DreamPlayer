@@ -3,8 +3,8 @@ import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../danmaku/binding/danmaku_binding_store.dart';
 import '../danmaku/scraper/scrape_state.dart';
-import '../danmaku/scraper/scrape_store.dart';
 import '../danmaku/service/danmaku_service.dart';
 import '../library/models/library_models.dart';
 import '../library/title_playback_preferences.dart';
@@ -287,7 +287,8 @@ class _UnifiedTitleDetailsScreenState extends State<UnifiedTitleDetailsScreen> {
       final key = file.legacyResumeKey;
       final state = _danmakuByFileKey[key] ?? _danmakuByFileKey['danmaku:$key'];
       if (state?.ref != null &&
-          (state!.status == ScrapeStatus.success ||
+          (state!.status == ScrapeStatus.matched ||
+              state.status == ScrapeStatus.success ||
               state.status == ScrapeStatus.empty ||
               state.status == ScrapeStatus.cached)) {
         return state;
@@ -313,15 +314,20 @@ class _UnifiedTitleDetailsScreenState extends State<UnifiedTitleDetailsScreen> {
       seriesTitle: title.displayTitle,
       seriesKey: folder.metadataKey,
     );
-    final state = await ScrapeStore.loadTask(scope);
+    final bindings = await DanmakuBindingStore.loadForScope(scope);
     if (!mounted ||
         _requestedDanmakuScope != '${title.id}:s${season ?? 'unknown'}') {
       return;
     }
     setState(() {
       _danmakuByFileKey = {
-        for (final episode in state?.episodes ?? const <ScrapeEpisodeState>[])
-          episode.key: episode,
+        for (final entry in bindings.entries)
+          entry.key: ScrapeEpisodeState(
+            key: entry.key,
+            fileName: entry.key,
+            status: ScrapeStatus.matched,
+            ref: entry.value.ref,
+          ),
       };
     });
   }

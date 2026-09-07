@@ -1,9 +1,10 @@
 import 'dart:async';
 
+import '../binding/danmaku_binding_store.dart';
+import '../source/danmaku_source_registry.dart';
 import 'episode_mapper.dart';
 import 'scrape_store.dart' as store;
 import 'scrape_state.dart';
-import '../source/danmaku_source_registry.dart';
 
 /// Identity the Agent-B adapter can hash/match with (PRD 匹配优先级:
 /// hash+文件名+大小 → hash+文件名 → 文件名+大小 → 剧名/季/集 文本匹配).
@@ -58,7 +59,11 @@ abstract interface class DanmakuScrapeSource {
 abstract interface class DanmakuScrapeRepository {
   /// True when a valid danmaku cache exists for [videoKey]. [forceRefresh]
   /// short-circuits the check (batch "重新刮削").
-  Future<bool> hasValidCache(String videoKey, {bool forceRefresh = false});
+  Future<bool> hasValidCache(
+    String videoKey, {
+    bool forceRefresh = false,
+    String? episodeId,
+  });
 
   /// Downloads the comments for [ref] and caches them against [videoKey].
   /// Returns the stored comment count (0 = empty episode, still cached).
@@ -123,17 +128,103 @@ class SeriesScraper {
 
   /// Restores the last persisted terminal snapshot for this source/series.
   /// Transient rows are normalized to pending by [ScrapeStore].
-  Future<SeriesScrapeState?> restore(SeriesScope scope) async {
+  Future<SeriesScrapeState?> restore(
+    SeriesScope scope, {
+    List<ScrapeVideo> videos = const <ScrapeVideo>[],
+  }) async {
     final restored = await store.ScrapeStore.loadTask(scope);
-    if (restored == null) return null;
-    _state = restored;
-    _generation = restored.generation;
-    _selectedAnimeId = restored.selectedAnimeId;
-    _selectedAnimeTitle = restored.selectedAnimeTitle;
-    _selectedEpisodeOffset = restored.selectedEpisodeOffset;
+    if (restored == null && videos.isEmpty) return null;
+
+    // One-time migration for matches saved by versions before bindings were
+    // separated from scrape/download task state.
+    final persisted = await DanmakuBindingStore.loadForScope(
+      scope,
+      videoIdentities: <String>{
+        ...videos.map((video) => video.key),
+        ...?restored?.episodes.map((episode) => episode.key),
+      },
+    );
+    final legacy = <String, DanmakuEpisodeRef>{};
+    for (final episode in restored?.episodes ?? const <ScrapeEpisodeState>[]) {
+      if (episode.ref != null && !persisted.containsKey(episode.key)) {
+        legacy[episode.key] = episode.ref!;
+      }
+    }
+    if (legacy.isNotEmpty) {
+      await DanmakuBindingStore.saveAll(scope, legacy, manual: false);
+      persisted.addAll(
+        await DanmakuBindingStore.loadForScope(
+          scope,
+          videoIdentities: legacy.keys,
+        ),
+      );
+    }
+
+    final existingByKey = <String, ScrapeEpisodeState>{
+      for (final episode in restored?.episodes ?? const <ScrapeEpisodeState>[])
+        episode.key: episode,
+    };
+    final state = videos.isEmpty
+        ? restored!
+        : SeriesScrapeState(
+            scope: scope,
+            generation: restored?.generation ?? 0,
+            selectedAnimeId: restored?.selectedAnimeId,
+            selectedAnimeTitle: restored?.selectedAnimeTitle,
+            selectedEpisodeOffset: restored?.selectedEpisodeOffset ?? 0,
+            episodes: [
+              for (final video in videos)
+                _restoredRow(
+                  video,
+                  existingByKey[video.key],
+                  persisted[video.key],
+                ),
+            ],
+          );
+    _state = state;
+    _generation = state.generation;
+    _selectedAnimeId = state.selectedAnimeId;
+    _selectedAnimeTitle = state.selectedAnimeTitle;
+    _selectedEpisodeOffset = state.selectedEpisodeOffset;
     _cancelRequested = false;
     _notify();
-    return restored;
+    return state;
+  }
+
+  static ScrapeEpisodeState _restoredRow(
+    ScrapeVideo video,
+    ScrapeEpisodeState? previous,
+    DanmakuBinding? binding,
+  ) {
+    if (binding != null) {
+      final sameCachedEpisode =
+          previous?.ref?.episodeId == binding.ref.episodeId &&
+          (previous?.status == ScrapeStatus.cached ||
+              previous?.status == ScrapeStatus.success ||
+              previous?.status == ScrapeStatus.empty);
+      return ScrapeEpisodeState(
+        key: video.key,
+        fileName: video.fileName,
+        season: video.season,
+        episode: video.episode,
+        status: sameCachedEpisode ? previous!.status : ScrapeStatus.matched,
+        ref: binding.ref,
+        commentCount: sameCachedEpisode ? previous?.commentCount : null,
+        fetchedAt: sameCachedEpisode ? previous?.fetchedAt : null,
+      );
+    }
+    return ScrapeEpisodeState(
+      key: video.key,
+      fileName: video.fileName,
+      season: video.season,
+      episode: video.episode,
+      status:
+          previous?.status == ScrapeStatus.failed ||
+              previous?.status == ScrapeStatus.noMatch
+          ? previous!.status
+          : ScrapeStatus.pending,
+      error: previous?.error,
+    );
   }
 
   bool get _isStale => _cancelRequested;
@@ -172,17 +263,24 @@ class SeriesScraper {
     );
     _state = st;
 
+    final savedBindings = await DanmakuBindingStore.loadForScope(
+      scope,
+      videoIdentities: videos.map((video) => video.key),
+    );
+
     st.phase = ScrapePhase.scanning;
     _notify();
 
     for (final v in videos) {
+      final binding = savedBindings[v.key];
       st.episodes.add(
         ScrapeEpisodeState(
           key: v.key,
           fileName: v.fileName,
-          status: ScrapeStatus.pending,
+          status: binding == null ? ScrapeStatus.pending : ScrapeStatus.matched,
           season: v.season,
           episode: v.episode,
+          ref: binding?.ref,
         ),
       );
     }
@@ -198,6 +296,7 @@ class SeriesScraper {
         cached = await repository.hasValidCache(
           videos[i].key,
           forceRefresh: forceRefresh,
+          episodeId: savedBindings[videos[i].key]?.ref.episodeId,
         );
       } on Exception {
         // A cache read failure is a miss; the normal fetch path may repair it.
@@ -220,26 +319,33 @@ class SeriesScraper {
       return SeriesScrapeResult(completed: true, generation: generation);
     }
 
-    // 1. Remote catalog (single request for the whole series).
-    st.phase = ScrapePhase.matching;
-    _notify();
-    List<DanmakuCatalogAnime> catalog;
-    try {
-      catalog = await _withRetry(
-        () =>
-            source.searchEpisodes(scope.seriesTitle, cancelToken: cancelToken),
-        cancelToken: cancelToken,
-      );
-    } on DanmakuScrapeException {
-      if (_isStale || generation != _generation) {
+    // 1. Resolve a catalog only when at least one file has no saved binding.
+    // A fully bound season can be pre-cached without repeating the search.
+    List<DanmakuCatalogAnime> catalog = const [];
+    final needsMatching = pendingVideos.any((video) {
+      final row = st.episodes.firstWhere((episode) => episode.key == video.key);
+      return row.ref == null;
+    });
+    if (needsMatching) {
+      st.phase = ScrapePhase.matching;
+      _notify();
+      try {
+        catalog = await _withRetry(
+          () => source.searchEpisodes(
+            scope.seriesTitle,
+            cancelToken: cancelToken,
+          ),
+          cancelToken: cancelToken,
+        );
+      } on DanmakuScrapeException {
+        if (_isStale || generation != _generation) {
+          return SeriesScrapeResult(completed: false, generation: generation);
+        }
+        st.phase = ScrapePhase.failed;
+        _notify();
+        await store.ScrapeStore.saveTask(st);
         return SeriesScrapeResult(completed: false, generation: generation);
       }
-      // Catalog failed after retries: whole run fails but leaves per-episode
-      // states untouched (they were all still pending).
-      st.phase = ScrapePhase.failed;
-      _notify();
-      await store.ScrapeStore.saveTask(st);
-      return SeriesScrapeResult(completed: false, generation: generation);
     }
     if (_isStale || generation != _generation) {
       return SeriesScrapeResult(completed: false, generation: generation);
@@ -302,9 +408,66 @@ class SeriesScraper {
     );
   }
 
+  /// Resolves and atomically saves a whole season's file-to-episode bindings.
+  /// This method performs no comment downloads; playback loads a bound episode
+  /// on demand and [start] remains the explicit whole-season pre-cache action.
+  Future<int> bindSeries(
+    SeriesScope scope,
+    List<ScrapeVideo> videos,
+    DanmakuCatalogAnime anime, {
+    int episodeOffset = 0,
+  }) async {
+    _cancelToken?.cancel();
+    _cancelRequested = false;
+    _selectedAnimeId = anime.animeId;
+    _selectedAnimeTitle = anime.animeTitle;
+    _selectedEpisodeOffset = episodeOffset;
+    final generation = ++_generation;
+    final bindings = <String, DanmakuEpisodeRef>{};
+    final rows = <ScrapeEpisodeState>[];
+    for (final video in videos) {
+      final ref = _mapFromCatalog(video, scope, <DanmakuCatalogAnime>[anime]);
+      if (ref != null) bindings[video.key] = ref;
+      rows.add(
+        ScrapeEpisodeState(
+          key: video.key,
+          fileName: video.fileName,
+          season: video.season,
+          episode: video.episode,
+          status: ref == null ? ScrapeStatus.noMatch : ScrapeStatus.matched,
+          ref: ref,
+        ),
+      );
+    }
+
+    // One durable commit for the complete selection. Unmapped files in this
+    // batch explicitly lose an older choice rather than retaining stale data.
+    await DanmakuBindingStore.saveAll(
+      scope,
+      bindings,
+      replaceVideoIdentities: videos.map((video) => video.key),
+      manual: true,
+    );
+    final state = SeriesScrapeState(
+      scope: scope,
+      episodes: rows,
+      generation: generation,
+      selectedAnimeId: anime.animeId,
+      selectedAnimeTitle: anime.animeTitle,
+      selectedEpisodeOffset: episodeOffset,
+    );
+    state.phase = bindings.length == videos.length
+        ? ScrapePhase.completed
+        : ScrapePhase.partialFailure;
+    _state = state;
+    await store.ScrapeStore.saveTask(state);
+    _notify();
+    return bindings.length;
+  }
+
   /// Rebinds one local file to an explicitly selected remote episode.
-  /// The fetched cache and persisted task row both carry the user's choice,
-  /// so playback uses it immediately and an app restart does not lose it.
+  /// Only the durable binding is changed here. The next playback loads its
+  /// comments on demand; pre-caching is an explicit, separate operation.
   Future<void> manualMatchEpisode(
     SeriesScope scope,
     String videoKey,
@@ -318,39 +481,16 @@ class SeriesScraper {
     final generation = ++_generation;
     _cancelToken?.cancel();
     _cancelRequested = false;
-    final token = DanmakuCancelToken();
-    _cancelToken = token;
     st.generation = generation;
-    st.phase = ScrapePhase.downloading;
+    await DanmakuBindingStore.save(scope, videoKey, ref, manual: true);
     st.episodes[index] = st.episodes[index].copyWith(
-      status: ScrapeStatus.fetching,
+      status: ScrapeStatus.matched,
       ref: ref,
       clearError: true,
+      clearCommentCount: true,
+      clearFetchedAt: true,
     );
-    _notify();
-    try {
-      await _pace();
-      final count = await _withRetry<int>(
-        () => repository.fetchAndCache(ref, videoKey, cancelToken: token),
-        cancelToken: token,
-      );
-      if (_isStale || generation != _generation) return;
-      st.episodes[index] = st.episodes[index].copyWith(
-        status: count > 0 ? ScrapeStatus.success : ScrapeStatus.empty,
-        ref: ref,
-        commentCount: count,
-        fetchedAt: DateTime.now(),
-        clearError: true,
-      );
-    } on DanmakuScrapeException catch (error) {
-      if (_isStale || generation != _generation) return;
-      st.episodes[index] = st.episodes[index].copyWith(
-        status: ScrapeStatus.failed,
-        ref: ref,
-        error: error.message,
-      );
-    }
-    st.phase = st.hasFailure || st.noMatchCount > 0
+    st.phase = st.noMatchCount > 0
         ? ScrapePhase.partialFailure
         : ScrapePhase.completed;
     _notify();
@@ -445,6 +585,7 @@ class SeriesScraper {
     final cached = await repository.hasValidCache(
       video.key,
       forceRefresh: forceRefresh,
+      episodeId: st.episodes[idx].ref?.episodeId,
     );
     if (_isStale || generation != _generation) return;
     if (cached && !forceRefresh) {
@@ -453,7 +594,8 @@ class SeriesScraper {
       await store.ScrapeStore.saveTask(st);
       return;
     }
-    DanmakuEpisodeRef? ref;
+    DanmakuEpisodeRef? ref = st.episodes[idx].ref;
+    final hadSavedBinding = ref != null;
     var matchAttempted = false;
     Future<DanmakuEpisodeRef?> requestMatch() async {
       matchAttempted = true;
@@ -479,7 +621,7 @@ class SeriesScraper {
       // A content hash is stronger than title/catalog heuristics. Remote
       // files without a hash use the catalog first to avoid one match request
       // per episode.
-      if (video.fileHash?.isNotEmpty == true) {
+      if (ref == null && video.fileHash?.isNotEmpty == true) {
         ref = await requestMatch();
       }
       ref ??= _mapFromCatalog(video, scope, catalog);
@@ -512,6 +654,9 @@ class SeriesScraper {
       ref: ref,
       clearError: true,
     );
+    if (!hadSavedBinding) {
+      await DanmakuBindingStore.save(scope, video.key, ref, manual: false);
+    }
     _notify();
 
     // 3. Fetch + cache.

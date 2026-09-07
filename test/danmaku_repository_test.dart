@@ -77,6 +77,30 @@ void main() {
     expect(result.entry!.appliedShiftSeconds, 2.5);
   });
 
+  test('a changed binding does not reuse another episode cache', () async {
+    const request = DanmakuVideoRequest(
+      videoIdentity: 'video-rebound',
+      fileName: 'Example.S01E02.mkv',
+    );
+    await repository.loadForEpisode(
+      sourceId: source.sourceId,
+      baseUrl: 'https://danmaku.example',
+      request: request,
+      episodeId: 'old-episode',
+    );
+
+    final rebound = await repository.loadForEpisode(
+      sourceId: source.sourceId,
+      baseUrl: 'https://danmaku.example',
+      request: request,
+      episodeId: 'new-episode',
+    );
+
+    expect(rebound.status, DanmakuFetchStatus.fromNetwork);
+    expect(rebound.entry!.episodeId, 'new-episode');
+    expect(source.requestedEpisodeIds, ['old-episode', 'new-episode']);
+  });
+
   test('clearAll removes disk and memory entries', () async {
     await repository.loadForVideo(
       sourceId: source.sourceId,
@@ -102,6 +126,7 @@ void main() {
 
 class _Source implements DanmakuSource {
   int fetchCalls = 0;
+  final List<String> requestedEpisodeIds = [];
 
   @override
   String get sourceId => 'test-source';
@@ -136,6 +161,7 @@ class _Source implements DanmakuSource {
     DanmakuCancelToken? cancelToken,
   }) async {
     fetchCalls++;
+    requestedEpisodeIds.add(episodeId);
     return const DanmakuSourceComments(
       comments: [
         DanmakuSourceComment(

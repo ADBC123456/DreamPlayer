@@ -74,11 +74,15 @@ void main() {
         ),
       ),
     );
-    await pumpUntilFound(tester, find.text('1 / 1 · Completed'));
+    await pumpUntilFound(tester, find.text('0 / 1 · Ready'));
 
-    expect(find.text('1 / 1 · Completed'), findsOneWidget);
+    expect(find.text('0 / 1 · Ready'), findsOneWidget);
+    expect(repository.videoKeys, isEmpty);
+    expect(find.byKey(const Key('precache-season')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('precache-season')));
+    await pumpUntilFound(tester, find.text('1 / 1 · Completed'));
     expect(find.text('success · 3'), findsOneWidget);
-    expect(find.byKey(const Key('force-rescrape')), findsOneWidget);
     expect(repository.videoKeys, [
       'danmaku:/shows/example/Example.Show.S01E01.mkv',
     ]);
@@ -164,5 +168,6 @@ class _Repository implements DanmakuScrapeRepository {
   Future<bool> hasValidCache(
     String videoKey, {
     bool forceRefresh = false,
+    String? episodeId,
   }) async => false;
 }

@@ -87,6 +87,10 @@ class AppLocalizations {
       (RegExp(r'^(\d+) comments$'), (m) => '${m[1]} 条弹幕'),
       (RegExp(r'^(\d+) chapters$'), (m) => '${m[1]} 个章节'),
       (RegExp(r'^(\d+) episodes$'), (m) => '${m[1]} 集'),
+      (
+        RegExp(r'^Saved (\d+) / (\d+) episode bindings$'),
+        (m) => '已保存 ${m[1]} / ${m[2]} 个剧集匹配',
+      ),
       (RegExp(r'^Episode (\d+)$'), (m) => '第 ${m[1]} 集'),
       (RegExp(r'^Local episode (\d+)$'), (m) => '本地第 ${m[1]} 集'),
       (RegExp(r'^Remote episode (\d+)$'), (m) => '远程第 ${m[1]} 集'),
@@ -250,6 +254,9 @@ class AppLocalizations {
     'Cancel scraping': '取消刮削',
     'Retry failed': '重试失败项',
     'Force re-scrape': '强制重新刮削',
+    'Pre-cache whole season': '预缓存整季弹幕',
+    'This saves the bindings only. Comments load when an episode plays.':
+        '这里只保存匹配关系，播放对应剧集时才加载弹幕。',
     'Select series and batch match': '选择系列并批量匹配',
     'Select first remote episode': '选择首集对应的远程弹幕',
     'Select exact danmaku episode': '选择具体弹幕剧集',
