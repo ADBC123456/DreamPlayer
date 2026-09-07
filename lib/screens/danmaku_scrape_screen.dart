@@ -56,6 +56,8 @@ class _DanmakuScrapeScreenState extends State<DanmakuScrapeScreen> {
   SeriesScope? _scope;
   List<ScrapeVideo> _videos = const [];
   bool _preparing = true;
+  bool _disposing = false;
+  bool _selecting = false;
   String? _setupError;
   bool _noSource = false;
 
@@ -77,6 +79,7 @@ class _DanmakuScrapeScreenState extends State<DanmakuScrapeScreen> {
 
   @override
   void dispose() {
+    _disposing = true;
     if (_running) _scraper?.cancel();
     super.dispose();
   }
@@ -186,7 +189,148 @@ class _DanmakuScrapeScreenState extends State<DanmakuScrapeScreen> {
   );
 
   void _changed() {
-    if (mounted) setState(() {});
+    if (!_disposing && mounted) setState(() {});
+  }
+
+  Future<List<DanmakuCatalogAnime>?> _loadCandidates() async {
+    final scraper = _scraper;
+    final scope = _scope;
+    if (scraper == null || scope == null || _selecting) return null;
+    setState(() => _selecting = true);
+    try {
+      final candidates = await scraper.searchCandidates(scope);
+      if (!mounted || _disposing) return null;
+      if (candidates.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: AppText('No danmaku series candidates found'),
+          ),
+        );
+        return null;
+      }
+      return candidates;
+    } catch (error) {
+      if (mounted && !_disposing) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: AppText('Could not load candidates: $error')),
+        );
+      }
+      return null;
+    } finally {
+      if (mounted && !_disposing) setState(() => _selecting = false);
+    }
+  }
+
+  Future<void> _chooseSeriesForBatch() async {
+    final candidates = await _loadCandidates();
+    if (candidates == null || !mounted) return;
+    final selected = await showModalBottomSheet<DanmakuCatalogAnime>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (context) => _SeriesCandidateSheet(
+        title: widget.seriesTitle,
+        candidates: candidates,
+      ),
+    );
+    if (selected == null || !mounted) return;
+    final numbered = _videos.map((video) => video.episode).whereType<int>();
+    final firstLocalEpisode = numbered.isEmpty
+        ? 1
+        : numbered.reduce((a, b) => a < b ? a : b);
+    final startChoice = await showModalBottomSheet<_EpisodeCandidate>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (context) => _EpisodeCandidateSheet(
+        title: 'Select first remote episode',
+        localLabel: 'Local episode $firstLocalEpisode',
+        anime: selected,
+        suggestedEpisode: firstLocalEpisode,
+      ),
+    );
+    if (startChoice == null || !mounted) return;
+    final remoteStart = startChoice.episode.episodeNumber;
+    if (remoteStart == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: AppText('Remote episode has no index')),
+      );
+      return;
+    }
+    final offset = remoteStart - firstLocalEpisode;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const AppText('Batch match current season?'),
+        content: AppText(
+          '${selected.animeTitle}\n'
+          '${selected.episodes.length} remote episodes · ${_videos.length} local files\n'
+          'Local episode $firstLocalEpisode → remote episode $remoteStart',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const AppText('Cancel'),
+          ),
+          FilledButton(
+            key: const Key('confirm-batch-match'),
+            onPressed: () => Navigator.pop(context, true),
+            child: const AppText('Match all'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await _scraper?.start(
+      _scope!,
+      _videos,
+      forceRefresh: true,
+      selectedAnimeId: selected.animeId,
+      selectedAnimeTitle: selected.animeTitle,
+      selectedEpisodeOffset: offset,
+    );
+    _changed();
+  }
+
+  Future<void> _chooseEpisode(ScrapeEpisodeState episode) async {
+    final candidates = await _loadCandidates();
+    if (candidates == null || !mounted) return;
+    final episodeNumber = episode.episode;
+    final anime = await showModalBottomSheet<DanmakuCatalogAnime>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (context) => _SeriesCandidateSheet(
+        title: widget.seriesTitle,
+        candidates: candidates,
+      ),
+    );
+    if (anime == null || !mounted) return;
+    final selected = await showModalBottomSheet<_EpisodeCandidate>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (context) => _EpisodeCandidateSheet(
+        title: 'Select exact danmaku episode',
+        localLabel: episodeNumber == null
+            ? episode.fileName
+            : 'Episode $episodeNumber',
+        anime: anime,
+        suggestedEpisode: episodeNumber,
+      ),
+    );
+    if (selected == null || !mounted) return;
+    await _scraper?.manualMatchEpisode(
+      _scope!,
+      episode.key,
+      DanmakuEpisodeRef(
+        animeId: selected.anime.animeId,
+        episodeId: selected.episode.episodeId,
+        animeTitle: selected.anime.animeTitle,
+        episodeTitle: selected.episode.episodeTitle,
+      ),
+    );
+    _changed();
   }
 
   Future<void> _run({bool force = false}) async {
@@ -297,6 +441,22 @@ class _DanmakuScrapeScreenState extends State<DanmakuScrapeScreen> {
                           label: const AppText('Retry failed'),
                         ),
                       if (!_running)
+                        FilledButton.tonalIcon(
+                          key: const Key('select-danmaku-series'),
+                          onPressed: _selecting ? null : _chooseSeriesForBatch,
+                          icon: _selecting
+                              ? const SizedBox.square(
+                                  dimension: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(
+                                  Icons.playlist_add_check_circle_outlined,
+                                ),
+                          label: const AppText('Select series and batch match'),
+                        ),
+                      if (!_running)
                         OutlinedButton.icon(
                           key: const Key('force-rescrape'),
                           onPressed: () => _run(force: true),
@@ -309,7 +469,7 @@ class _DanmakuScrapeScreenState extends State<DanmakuScrapeScreen> {
                     const SizedBox(height: 12),
                     AppText(
                       'Unmatched or duplicate candidates need manual matching. '
-                      'Manual selection is not supported here yet; no candidate was silently chosen.',
+                      'Select a remote series for batch matching, or tap an episode to change its source.',
                       style: theme.textTheme.bodySmall?.copyWith(
                         color: theme.colorScheme.tertiary,
                       ),
@@ -335,6 +495,9 @@ class _DanmakuScrapeScreenState extends State<DanmakuScrapeScreen> {
                 status: episode?.status ?? ScrapeStatus.pending,
                 commentCount: episode?.commentCount,
                 error: episode?.error,
+                onTap: episode == null || _running
+                    ? null
+                    : () => _chooseEpisode(episode),
               );
             },
           ),
@@ -363,6 +526,7 @@ class _EpisodeTile extends StatelessWidget {
     this.episode,
     this.commentCount,
     this.error,
+    this.onTap,
   });
   final String fileName;
   final ScrapeStatus status;
@@ -370,6 +534,7 @@ class _EpisodeTile extends StatelessWidget {
   final int? episode;
   final int? commentCount;
   final String? error;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
@@ -379,6 +544,7 @@ class _EpisodeTile extends StatelessWidget {
         : fileName;
     return Card(
       child: ListTile(
+        onTap: onTap,
         dense: true,
         leading: Icon(_statusIcon(status), color: _statusColor(theme, status)),
         title: AppText(label),
@@ -439,6 +605,152 @@ class _NoSource extends StatelessWidget {
       onPressed: onConfigure,
       icon: const Icon(Icons.settings_outlined),
       label: const AppText('Configure source'),
+    ),
+  );
+}
+
+class _SeriesCandidateSheet extends StatelessWidget {
+  const _SeriesCandidateSheet({required this.title, required this.candidates});
+  final String title;
+  final List<DanmakuCatalogAnime> candidates;
+
+  @override
+  Widget build(BuildContext context) => SafeArea(
+    child: SizedBox(
+      height: MediaQuery.sizeOf(context).height * 0.72,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
+            child: AppText(
+              'Select danmaku series · $title',
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
+          ),
+          Expanded(
+            child: ListView.separated(
+              itemCount: candidates.length,
+              separatorBuilder: (_, _) => const Divider(height: 1),
+              itemBuilder: (context, index) {
+                final candidate = candidates[index];
+                return ListTile(
+                  key: Key('series-candidate-${candidate.animeId}'),
+                  leading: const Icon(Icons.live_tv_outlined),
+                  title: AppText(candidate.animeTitle),
+                  subtitle: AppText('${candidate.episodes.length} episodes'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => Navigator.pop(context, candidate),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+class _EpisodeCandidate {
+  const _EpisodeCandidate({required this.anime, required this.episode});
+  final DanmakuCatalogAnime anime;
+  final DanmakuCatalogEpisode episode;
+}
+
+class _EpisodeCandidateSheet extends StatefulWidget {
+  const _EpisodeCandidateSheet({
+    required this.title,
+    required this.localLabel,
+    required this.anime,
+    this.suggestedEpisode,
+  });
+  final String title;
+  final String localLabel;
+  final DanmakuCatalogAnime anime;
+  final int? suggestedEpisode;
+
+  @override
+  State<_EpisodeCandidateSheet> createState() => _EpisodeCandidateSheetState();
+}
+
+class _EpisodeCandidateSheetState extends State<_EpisodeCandidateSheet> {
+  String _query = '';
+
+  List<DanmakuCatalogEpisode> get _episodes {
+    final normalized = _query.trim().toLowerCase();
+    final items = widget.anime.episodes.where((episode) {
+      if (normalized.isEmpty) return true;
+      return episode.episodeTitle.toLowerCase().contains(normalized) ||
+          '${episode.episodeNumber ?? ''}' == normalized;
+    }).toList();
+    final suggested = widget.suggestedEpisode;
+    if (normalized.isEmpty && suggested != null) {
+      items.sort((a, b) {
+        final aDistance = ((a.episodeNumber ?? 1 << 20) - suggested).abs();
+        final bDistance = ((b.episodeNumber ?? 1 << 20) - suggested).abs();
+        return aDistance.compareTo(bDistance);
+      });
+    }
+    return items;
+  }
+
+  @override
+  Widget build(BuildContext context) => SafeArea(
+    child: SizedBox(
+      height: MediaQuery.sizeOf(context).height * 0.72,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                AppText(
+                  widget.title,
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+                const SizedBox(height: 4),
+                AppText(
+                  '${widget.localLabel} · ${widget.anime.animeTitle}',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  decoration: const InputDecoration(
+                    prefixIcon: Icon(Icons.search),
+                    hintText: 'Search episode number or title',
+                    border: OutlineInputBorder(),
+                  ),
+                  onChanged: (value) => setState(() => _query = value),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: ListView.separated(
+              itemCount: _episodes.length,
+              separatorBuilder: (_, _) => const Divider(height: 1),
+              itemBuilder: (context, index) {
+                final episode = _episodes[index];
+                return ListTile(
+                  leading: const Icon(Icons.subtitles_outlined),
+                  title: AppText(episode.episodeTitle),
+                  subtitle: episode.episodeNumber == null
+                      ? null
+                      : AppText('Remote episode ${episode.episodeNumber}'),
+                  onTap: () => Navigator.pop(
+                    context,
+                    _EpisodeCandidate(anime: widget.anime, episode: episode),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
     ),
   );
 }

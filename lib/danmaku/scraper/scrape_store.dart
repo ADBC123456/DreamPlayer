@@ -81,6 +81,11 @@ class ScrapeStore {
       if (s.scope.season != null) 'season': s.scope.season,
     },
     'phase': s.phase.wire,
+    if (s.selectedAnimeId != null) 'selectedAnimeId': s.selectedAnimeId,
+    if (s.selectedAnimeTitle != null)
+      'selectedAnimeTitle': s.selectedAnimeTitle,
+    if (s.selectedEpisodeOffset != 0)
+      'selectedEpisodeOffset': s.selectedEpisodeOffset,
     'episodes': [for (final e in s.episodes) _episodeToJson(e)],
   };
 
@@ -138,6 +143,10 @@ class ScrapeStore {
           ? ScrapePhase.completed
           : ScrapePhase.partialFailure,
       generation: 0,
+      selectedAnimeId: json['selectedAnimeId'] as String?,
+      selectedAnimeTitle: json['selectedAnimeTitle'] as String?,
+      selectedEpisodeOffset:
+          (json['selectedEpisodeOffset'] as num?)?.toInt() ?? 0,
     );
   }
 }

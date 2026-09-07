@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../danmaku/scraper/scrape_state.dart';
+import '../danmaku/scraper/scrape_store.dart';
+import '../danmaku/service/danmaku_service.dart';
 import '../library/models/library_models.dart';
 import '../library/title_playback_preferences.dart';
 import '../library/unified_library_service.dart';
@@ -36,6 +38,8 @@ class _UnifiedTitleDetailsScreenState extends State<UnifiedTitleDetailsScreen> {
   bool _opening = false;
   bool _refreshing = false;
   bool _overviewExpanded = false;
+  Map<String, ScrapeEpisodeState> _danmakuByFileKey = const {};
+  String? _requestedDanmakuScope;
 
   ContinueWatchingEntry? get _resume => _progress.firstOrNull;
 
@@ -108,6 +112,13 @@ class _UnifiedTitleDetailsScreenState extends State<UnifiedTitleDetailsScreen> {
     final visibleEpisodes = seasons.length <= 1
         ? episodes
         : episodes.where((e) => e.seasonNumber == _selectedSeason).toList();
+    final danmakuScope = '${title.id}:s${_selectedSeason ?? 'unknown'}';
+    if (_requestedDanmakuScope != danmakuScope) {
+      _requestedDanmakuScope = danmakuScope;
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => _loadDanmakuMatches(title, _selectedSeason),
+      );
+    }
     final duplicates = episodes
         .where((e) => snapshot.versionsForEpisode(e.id).length > 1)
         .toList();
@@ -177,8 +188,10 @@ class _UnifiedTitleDetailsScreenState extends State<UnifiedTitleDetailsScreen> {
               child: _SeasonHeader(
                 seasons: seasons,
                 selected: _selectedSeason,
-                onSelected: (season) =>
-                    setState(() => _selectedSeason = season),
+                onSelected: (season) {
+                  _requestedDanmakuScope = null;
+                  setState(() => _selectedSeason = season);
+                },
                 onDanmaku: visibleEpisodes.isEmpty
                     ? null
                     : () =>
@@ -201,6 +214,7 @@ class _UnifiedTitleDetailsScreenState extends State<UnifiedTitleDetailsScreen> {
                   episodes: visibleEpisodes,
                   versionsFor: snapshot.versionsForEpisode,
                   progressFor: _episodeProgress,
+                  danmakuFor: _episodeDanmaku,
                   onPlay: (episode, versions) =>
                       _chooseAndPlay(title, episode, versions),
                   onMore: (episode, versions) =>
@@ -266,6 +280,50 @@ class _UnifiedTitleDetailsScreenState extends State<UnifiedTitleDetailsScreen> {
       );
     }
     return null;
+  }
+
+  ScrapeEpisodeState? _episodeDanmaku(List<MediaFile> versions) {
+    for (final file in versions) {
+      final key = file.legacyResumeKey;
+      final state = _danmakuByFileKey[key] ?? _danmakuByFileKey['danmaku:$key'];
+      if (state?.ref != null &&
+          (state!.status == ScrapeStatus.success ||
+              state.status == ScrapeStatus.empty ||
+              state.status == ScrapeStatus.cached)) {
+        return state;
+      }
+    }
+    return null;
+  }
+
+  Future<void> _loadDanmakuMatches(MediaTitle title, int? season) async {
+    final service = DanmakuService.instance;
+    await service.init();
+    final source = service.primarySource;
+    if (source == null || !mounted) return;
+    final folder = LibraryFolder(
+      id: 'unified:${title.id}:s${season ?? 'unknown'}',
+      name: title.displayTitle,
+      path: 'unified:${title.id}',
+      addedAt: DateTime.now(),
+    );
+    final scope = SeriesScope(
+      sourceId: source.id,
+      sourceBaseUrl: source.baseUrl,
+      seriesTitle: title.displayTitle,
+      seriesKey: folder.metadataKey,
+    );
+    final state = await ScrapeStore.loadTask(scope);
+    if (!mounted ||
+        _requestedDanmakuScope != '${title.id}:s${season ?? 'unknown'}') {
+      return;
+    }
+    setState(() {
+      _danmakuByFileKey = {
+        for (final episode in state?.episodes ?? const <ScrapeEpisodeState>[])
+          episode.key: episode,
+      };
+    });
   }
 
   String _primaryLabel() {
@@ -484,7 +542,19 @@ class _UnifiedTitleDetailsScreenState extends State<UnifiedTitleDetailsScreen> {
     if (action == 'play') {
       await _chooseAndPlay(title, episode, versions);
     } else if (action == 'danmaku') {
-      await _openDanmaku(title, episode.seasonNumber, [episode]);
+      final seasonEpisodes =
+          _library.snapshot.episodes.values
+              .where(
+                (candidate) =>
+                    candidate.titleId == title.id &&
+                    candidate.seasonNumber == episode.seasonNumber &&
+                    _library.snapshot
+                        .versionsForEpisode(candidate.id)
+                        .isNotEmpty,
+              )
+              .toList()
+            ..sort(_compareEpisodes);
+      await _openDanmaku(title, episode.seasonNumber, seasonEpisodes);
     }
   }
 
@@ -589,6 +659,8 @@ class _UnifiedTitleDetailsScreenState extends State<UnifiedTitleDetailsScreen> {
         ),
       ),
     );
+    _requestedDanmakuScope = '${title.id}:s${season ?? 'unknown'}';
+    await _loadDanmakuMatches(title, season);
   }
 }
 
@@ -1053,12 +1125,14 @@ class _EpisodeRail extends StatelessWidget {
     required this.episodes,
     required this.versionsFor,
     required this.progressFor,
+    required this.danmakuFor,
     required this.onPlay,
     required this.onMore,
   });
   final List<LibraryEpisode> episodes;
   final List<MediaFile> Function(String) versionsFor;
   final _EpisodeProgress? Function(List<MediaFile>) progressFor;
+  final ScrapeEpisodeState? Function(List<MediaFile>) danmakuFor;
   final void Function(LibraryEpisode, List<MediaFile>) onPlay;
   final void Function(LibraryEpisode, List<MediaFile>) onMore;
 
@@ -1066,7 +1140,7 @@ class _EpisodeRail extends StatelessWidget {
   Widget build(BuildContext context) {
     final width = MediaQuery.sizeOf(context).width >= 600 ? 214.0 : 174.0;
     return SizedBox(
-      height: width * 9 / 16 + 72,
+      height: width * 9 / 16 + 94,
       child: ListView.separated(
         padding: const EdgeInsets.fromLTRB(24, 0, 24, 8),
         scrollDirection: Axis.horizontal,
@@ -1081,6 +1155,7 @@ class _EpisodeRail extends StatelessWidget {
               episode: episode,
               versions: versions,
               progress: progressFor(versions),
+              danmaku: danmakuFor(versions),
               onPlay: () => onPlay(episode, versions),
               onMore: () => onMore(episode, versions),
             ),
@@ -1096,12 +1171,14 @@ class _EpisodeCard extends StatelessWidget {
     required this.episode,
     required this.versions,
     required this.progress,
+    required this.danmaku,
     required this.onPlay,
     required this.onMore,
   });
   final LibraryEpisode episode;
   final List<MediaFile> versions;
   final _EpisodeProgress? progress;
+  final ScrapeEpisodeState? danmaku;
   final VoidCallback onPlay;
   final VoidCallback onMore;
 
@@ -1221,6 +1298,16 @@ class _EpisodeCard extends StatelessWidget {
         AppText(
           '看到 ${_clock(progress!.position)}',
           style: const TextStyle(color: Colors.white54, fontSize: 12),
+        ),
+      if (danmaku?.ref != null)
+        Tooltip(
+          message: danmaku!.ref!.animeTitle ?? '',
+          child: AppText(
+            '弹幕：${danmaku!.ref!.episodeTitle ?? '第 ${episode.episodeNumber} 集'}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(color: Color(0xFF7CB5FF), fontSize: 12),
+          ),
         ),
     ],
   );
