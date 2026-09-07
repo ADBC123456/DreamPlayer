@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import '../binding/danmaku_binding_store.dart';
+import '../model/episode_title_classifier.dart';
 import '../source/danmaku_source_registry.dart';
 import 'episode_mapper.dart';
 import 'scrape_store.dart' as store;
@@ -158,6 +159,25 @@ class SeriesScraper {
           videoIdentities: legacy.keys,
         ),
       );
+    }
+
+    final obsoletePreviewBindings = persisted.entries
+        .where(
+          (entry) =>
+              !entry.value.manual &&
+              isDanmakuPromotionalEpisodeTitle(
+                entry.value.ref.episodeTitle ?? '',
+              ),
+        )
+        .map((entry) => entry.key)
+        .toList();
+    for (final key in obsoletePreviewBindings) {
+      await DanmakuBindingStore.remove(
+        sourceId: scope.sourceId,
+        sourceBaseUrl: scope.sourceBaseUrl,
+        videoIdentity: key,
+      );
+      persisted.remove(key);
     }
 
     final existingByKey = <String, ScrapeEpisodeState>{

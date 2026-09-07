@@ -10,6 +10,8 @@
 /// Purity: no imports, no IO — unit-testable and usable from isolates.
 library;
 
+import '../model/episode_title_classifier.dart';
+
 /// How the episode number was found.
 enum EpisodeSource {
   /// Not an episode (movie, standalone video, unknown).
@@ -144,6 +146,19 @@ class DanmakuEpisodeParser {
   }) {
     final base = _baseName(fileName);
     final name = _stripExtensionNoise(base);
+
+    // A catalog title such as `第1集预告` contains a valid-looking episode
+    // number, but it is promotional material. Classify it before all numbered
+    // patterns so it can never collide with the full episode automatically.
+    if (isDanmakuPromotionalEpisodeTitle(name)) {
+      return EpisodeInfo(
+        source: EpisodeSource.special,
+        season: _seasonFromFolder(folderName),
+        episode: 0,
+        special: SpecialKind.other,
+        seriesName: _seriesFromFolder(folderName),
+      );
+    }
 
     // 1) Season + episode: S01E02 / 1x02.
     final se =
@@ -390,6 +405,7 @@ class DanmuCatalogEpisode {
   static int _episodeNumberOf(String title) {
     final t = title.trim();
     if (t.isEmpty) return 0;
+    if (isDanmakuPromotionalEpisodeTitle(t)) return 0;
     final m = _titleEpisode.firstMatch(t);
     if (m != null) {
       final g = m.group(1) ?? m.group(2);
@@ -480,6 +496,7 @@ class DanmuEpisodeMapper {
   ) {
     final map = <int, List<DanmuCatalogEpisode>>{};
     for (final e in catalog) {
+      if (isDanmakuPromotionalEpisodeTitle(e.episodeTitle)) continue;
       final n = e.episodeNumber;
       if (n <= 0) continue;
       (map[n] ??= []).add(e);

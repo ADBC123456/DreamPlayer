@@ -5,6 +5,7 @@ import '../danmaku/scraper/series_scraper.dart';
 import '../danmaku/scraper/video_enumerator.dart';
 import '../danmaku/service/danmaku_service.dart';
 import '../danmaku/identity/video_identity.dart' as danmaku_identity;
+import '../danmaku/model/episode_title_classifier.dart';
 import '../services/library_folders.dart';
 import 'danmaku_settings_screen.dart';
 import '../l10n/app_localizations.dart';
@@ -29,6 +30,8 @@ class DanmakuScrapeScreen extends StatefulWidget {
     this.scraperFactory,
     this.initialVideos = const [],
     this.enumerateFolder = true,
+    this.openSeriesPickerOnReady = false,
+    this.suggestedEpisode,
   });
 
   final LibraryFolder folder;
@@ -42,6 +45,13 @@ class DanmakuScrapeScreen extends StatefulWidget {
   /// list. Disabling enumeration prevents an unrelated rescan of the source
   /// root and keeps other titles out of the task.
   final bool enumerateFolder;
+
+  /// Opens the series picker as soon as preparation completes. Detail pages
+  /// use this so tapping “match season” lands directly on the useful choice.
+  final bool openSeriesPickerOnReady;
+
+  /// Episode to put at the top of the remote episode picker.
+  final int? suggestedEpisode;
 
   @override
   State<DanmakuScrapeScreen> createState() => _DanmakuScrapeScreenState();
@@ -60,6 +70,7 @@ class _DanmakuScrapeScreenState extends State<DanmakuScrapeScreen> {
   bool _selecting = false;
   String? _setupError;
   bool _noSource = false;
+  bool _didOpenInitialPicker = false;
 
   SeriesScrapeState? get _state => _scraper?.state;
   bool get _running =>
@@ -226,15 +237,16 @@ class _DanmakuScrapeScreenState extends State<DanmakuScrapeScreen> {
     final firstLocalEpisode = numbered.isEmpty
         ? 1
         : numbered.reduce((a, b) => a < b ? a : b);
+    final localAnchorEpisode = widget.suggestedEpisode ?? firstLocalEpisode;
     final startChoice = await showModalBottomSheet<_EpisodeCandidate>(
       context: context,
       showDragHandle: true,
       isScrollControlled: true,
       builder: (context) => _EpisodeCandidateSheet(
         title: 'Select first remote episode',
-        localLabel: 'Local episode $firstLocalEpisode',
+        localLabel: 'Local episode $localAnchorEpisode',
         anime: selected,
-        suggestedEpisode: firstLocalEpisode,
+        suggestedEpisode: localAnchorEpisode,
       ),
     );
     if (startChoice == null || !mounted) return;
@@ -245,7 +257,7 @@ class _DanmakuScrapeScreenState extends State<DanmakuScrapeScreen> {
       );
       return;
     }
-    final offset = remoteStart - firstLocalEpisode;
+    final offset = remoteStart - localAnchorEpisode;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -253,7 +265,7 @@ class _DanmakuScrapeScreenState extends State<DanmakuScrapeScreen> {
         content: AppText(
           '${selected.animeTitle}\n'
           '${selected.episodes.length} remote episodes · ${_videos.length} local files\n'
-          'Local episode $firstLocalEpisode → remote episode $remoteStart\n\n'
+          'Local episode $localAnchorEpisode → remote episode $remoteStart\n\n'
           'This saves the bindings only. Comments load when an episode plays.',
         ),
         actions: [
@@ -363,6 +375,17 @@ class _DanmakuScrapeScreenState extends State<DanmakuScrapeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (widget.openSeriesPickerOnReady &&
+        !_didOpenInitialPicker &&
+        !_preparing &&
+        !_noSource &&
+        _setupError == null &&
+        _videos.isNotEmpty) {
+      _didOpenInitialPicker = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        if (mounted && !_disposing) await _chooseSeriesForBatch();
+      });
+    }
     final theme = Theme.of(context);
     return Scaffold(
       appBar: AppBar(title: const AppText('Scrape series danmaku')),
@@ -641,11 +664,18 @@ class _SeriesCandidateSheet extends StatelessWidget {
               separatorBuilder: (_, _) => const Divider(height: 1),
               itemBuilder: (context, index) {
                 final candidate = candidates[index];
+                final episodeCount = candidate.episodes
+                    .where(
+                      (episode) => !isDanmakuPromotionalEpisodeTitle(
+                        episode.episodeTitle,
+                      ),
+                    )
+                    .length;
                 return ListTile(
                   key: Key('series-candidate-${candidate.animeId}'),
                   leading: const Icon(Icons.live_tv_outlined),
                   title: AppText(candidate.animeTitle),
-                  subtitle: AppText('${candidate.episodes.length} episodes'),
+                  subtitle: AppText('$episodeCount episodes'),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () => Navigator.pop(context, candidate),
                 );
@@ -686,6 +716,7 @@ class _EpisodeCandidateSheetState extends State<_EpisodeCandidateSheet> {
   List<DanmakuCatalogEpisode> get _episodes {
     final normalized = _query.trim().toLowerCase();
     final items = widget.anime.episodes.where((episode) {
+      if (isDanmakuPromotionalEpisodeTitle(episode.episodeTitle)) return false;
       if (normalized.isEmpty) return true;
       return episode.episodeTitle.toLowerCase().contains(normalized) ||
           '${episode.episodeNumber ?? ''}' == normalized;
@@ -743,6 +774,7 @@ class _EpisodeCandidateSheetState extends State<_EpisodeCandidateSheet> {
               itemBuilder: (context, index) {
                 final episode = _episodes[index];
                 return ListTile(
+                  key: Key('episode-candidate-${episode.episodeId}'),
                   leading: const Icon(Icons.subtitles_outlined),
                   title: AppText(episode.episodeTitle),
                   subtitle: episode.episodeNumber == null

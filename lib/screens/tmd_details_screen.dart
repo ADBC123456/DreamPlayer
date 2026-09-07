@@ -785,6 +785,7 @@ class _TmdDetailsScreenState extends State<TmdDetailsScreen> {
                     folder: widget.folder!,
                     seriesTitle: _meta?.movie.title ?? widget.folder!.name,
                     initialVideos: _currentDanmakuVideos(),
+                    openSeriesPickerOnReady: true,
                   ),
                 ),
               ),

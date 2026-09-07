@@ -194,8 +194,14 @@ class _UnifiedTitleDetailsScreenState extends State<UnifiedTitleDetailsScreen> {
                 },
                 onDanmaku: visibleEpisodes.isEmpty
                     ? null
-                    : () =>
-                          _openDanmaku(title, _selectedSeason, visibleEpisodes),
+                    : () => _openDanmaku(
+                        title,
+                        _selectedSeason,
+                        visibleEpisodes,
+                        suggestedEpisode: _suggestedDanmakuEpisode(
+                          visibleEpisodes,
+                        ),
+                      ),
               ),
             ),
             if (visibleEpisodes.isEmpty)
@@ -352,7 +358,12 @@ class _UnifiedTitleDetailsScreenState extends State<UnifiedTitleDetailsScreen> {
       return;
     }
     if (value == 'danmaku') {
-      await _openDanmaku(title, _selectedSeason, episodes);
+      await _openDanmaku(
+        title,
+        _selectedSeason,
+        episodes,
+        suggestedEpisode: _suggestedDanmakuEpisode(episodes),
+      );
       return;
     }
     if (value == 'copy') {
@@ -560,7 +571,12 @@ class _UnifiedTitleDetailsScreenState extends State<UnifiedTitleDetailsScreen> {
               )
               .toList()
             ..sort(_compareEpisodes);
-      await _openDanmaku(title, episode.seasonNumber, seasonEpisodes);
+      await _openDanmaku(
+        title,
+        episode.seasonNumber,
+        seasonEpisodes,
+        suggestedEpisode: episode.episodeNumber,
+      );
     }
   }
 
@@ -632,8 +648,9 @@ class _UnifiedTitleDetailsScreenState extends State<UnifiedTitleDetailsScreen> {
   Future<void> _openDanmaku(
     MediaTitle title,
     int? season,
-    List<LibraryEpisode> episodes,
-  ) async {
+    List<LibraryEpisode> episodes, {
+    int? suggestedEpisode,
+  }) async {
     final videos = <ScrapeVideo>[];
     for (final episode in episodes) {
       for (final file in _library.snapshot.versionsForEpisode(episode.id)) {
@@ -662,11 +679,22 @@ class _UnifiedTitleDetailsScreenState extends State<UnifiedTitleDetailsScreen> {
           seriesTitle: title.displayTitle,
           initialVideos: videos,
           enumerateFolder: false,
+          openSeriesPickerOnReady: true,
+          suggestedEpisode: suggestedEpisode,
         ),
       ),
     );
     _requestedDanmakuScope = '${title.id}:s${season ?? 'unknown'}';
     await _loadDanmakuMatches(title, season);
+  }
+
+  int? _suggestedDanmakuEpisode(List<LibraryEpisode> episodes) {
+    final resumed = _resume?.video.metadataContext?.episodeNumber;
+    if (resumed != null &&
+        episodes.any((episode) => episode.episodeNumber == resumed)) {
+      return resumed;
+    }
+    return episodes.firstOrNull?.episodeNumber;
   }
 }
 

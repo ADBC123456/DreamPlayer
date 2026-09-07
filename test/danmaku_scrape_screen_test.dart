@@ -136,6 +136,11 @@ class _Source implements DanmakuScrapeSource {
       animeTitle: 'Example Show',
       episodes: [
         DanmakuCatalogEpisode(
+          episodeId: 'preview-1',
+          episodeTitle: '第1集预告',
+          episodeNumber: 1,
+        ),
+        DanmakuCatalogEpisode(
           episodeId: 'episode-1',
           episodeTitle: 'Episode 1',
           episodeNumber: 1,

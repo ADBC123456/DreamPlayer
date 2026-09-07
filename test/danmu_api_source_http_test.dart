@@ -244,6 +244,50 @@ void main() {
     expect(await source.match(fileName: 'Ambiguous.S01E01.mkv'), isNull);
   });
 
+  test(
+    'automatic match ignores preview entries returned before full episode',
+    () async {
+      final server = await startServer((request) async {
+        await jsonResponse(request, {
+          'success': true,
+          'isMatched': true,
+          'matches': [
+            {
+              'animeId': 1,
+              'episodeId': 101,
+              'episodeTitle': '【bilibili1】 星海飞驰第1集预告',
+            },
+            {'animeId': 1, 'episodeId': 102, 'episodeTitle': '第1集 风起天南'},
+          ],
+        });
+      });
+      addTearDown(() => server.close(force: true));
+      final source = DanmuApiSource(DanmuApiConfig(baseUrl: baseUrl(server)));
+
+      final match = await source.match(fileName: '凡人修仙传.S01E01.mkv');
+      expect(match?.episodeId, '102');
+    },
+  );
+
+  test(
+    'automatic match returns no match when only previews are returned',
+    () async {
+      final server = await startServer((request) async {
+        await jsonResponse(request, {
+          'success': true,
+          'isMatched': true,
+          'matches': [
+            {'animeId': 1, 'episodeId': 101, 'episodeTitle': '星海飞驰第1集预告'},
+          ],
+        });
+      });
+      addTearDown(() => server.close(force: true));
+      final source = DanmuApiSource(DanmuApiConfig(baseUrl: baseUrl(server)));
+
+      expect(await source.match(fileName: '凡人修仙传.S01E01.mkv'), isNull);
+    },
+  );
+
   test('cancels an in-flight response body immediately', () async {
     final requestSeen = Completer<void>();
     final server = await startServer((request) {

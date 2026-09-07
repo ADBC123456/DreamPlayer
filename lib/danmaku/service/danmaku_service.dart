@@ -24,6 +24,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../models/video_item.dart';
 import '../binding/danmaku_binding_store.dart';
 import '../identity/video_identity.dart' as vid;
+import '../model/episode_title_classifier.dart';
 import '../models/danmaku_models.dart' as models;
 import '../repository/danmaku_cache.dart';
 import '../repository/danmaku_repository.dart';
@@ -249,6 +250,15 @@ class DanmakuService {
         videoIdentity: identity.stableKey,
       );
       if (binding == null) continue;
+      if (!binding.manual &&
+          isDanmakuPromotionalEpisodeTitle(binding.ref.episodeTitle ?? '')) {
+        await DanmakuBindingStore.remove(
+          sourceId: source.id,
+          sourceBaseUrl: source.baseUrl,
+          videoIdentity: identity.stableKey,
+        );
+        continue;
+      }
       foundBinding = true;
       final result = await repository.loadForEpisode(
         sourceId: source.id,
@@ -344,11 +354,12 @@ class DanmakuService {
       final candidates = [
         for (final anime in catalog)
           for (final episode in anime.episodes)
-            if ((episode.episodeNumber ??
-                    mapper.DanmakuEpisodeParser.parse(
-                      episode.episodeTitle,
-                    ).episode) ==
-                episodeNumber)
+            if (!isDanmakuPromotionalEpisodeTitle(episode.episodeTitle) &&
+                (episode.episodeNumber ??
+                        mapper.DanmakuEpisodeParser.parse(
+                          episode.episodeTitle,
+                        ).episode) ==
+                    episodeNumber)
               episode,
       ];
       // A formal title that still maps to several catalog entries is
